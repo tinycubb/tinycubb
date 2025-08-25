@@ -1,0 +1,1895 @@
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, TensorDataset
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split, KFold
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
+from sklearn.inspection import permutation_importance
+import matplotlib.pyplot as plt
+import seaborn as sns
+from typing import List, Tuple, Optional, Dict, Union
+import warnings
+import time
+import copy
+from itertools import product
+warnings.filterwarnings('ignore')
+
+class MLPRegressor(nn.Module):
+    """
+    Flexible MLP architecture for regression tasks.
+    """
+    def __init__(self, input_size: int, hidden_layers: List[int], 
+                 dropout_rate: float = 0.2, activation: str = 'relu'):
+        super(MLPRegressor, self).__init__()
+        
+        self.input_size = input_size
+        self.hidden_layers = hidden_layers
+        self.dropout_rate = dropout_rate
+        self.activation_name = activation
+        
+        # Define activation function
+        if activation.lower() == 'relu':
+            self.activation = nn.ReLU()
+        elif activation.lower() == 'tanh':
+            self.activation = nn.Tanh()
+        elif activation.lower() == 'sigmoid':
+            self.activation = nn.Sigmoid()
+        elif activation.lower() == 'leaky_relu':
+            self.activation = nn.LeakyReLU()
+        else:
+            self.activation = nn.ReLU()
+        
+        # Build layers
+        layers = []
+        prev_size = input_size
+        
+        for hidden_size in hidden_layers:
+            layers.append(nn.Linear(prev_size, hidden_size))
+            layers.append(self.activation)
+            if dropout_rate > 0:
+                layers.append(nn.Dropout(dropout_rate))
+            prev_size = hidden_size
+        
+        # Output layer
+        layers.append(nn.Linear(prev_size, 1))
+        
+        self.network = nn.Sequential(*layers)
+        
+        # Initialize weights
+        self.apply(self._init_weights)
+    
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            nn.init.xavier_uniform_(module.weight)
+            nn.init.zeros_(module.bias)
+    
+    def forward(self, x):
+        return self.network(x).squeeze()
+
+class EnhancedMLP:
+    """
+    Enhanced MLP tool with comprehensive analysis and multiple workflows.
+    """
+    
+    def __init__(self, device: str = 'auto'):
+        self.data = None
+        self.X = None
+        self.y = None
+        self.X_train = None
+        self.X_test = None
+        self.y_train = None
+        self.y_test = None
+        self.scaler_X = StandardScaler()
+        self.scaler_y = StandardScaler()
+        self.model = None
+        self.feature_names = None
+        self.target_name = None
+        self.best_params = None
+        self.cv_results = None
+        self.model_report = {}
+        self.training_history = {}
+        
+        # Set device
+        if device == 'auto':
+            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        else:
+            self.device = torch.device(device)
+        
+        print(f"🔧 Using device: {self.device}")
+    
+    def load_data(self, file_path: str) -> pd.DataFrame:
+        """Load data from CSV file."""
+        try:
+            self.data = pd.read_csv(file_path)
+            print(f"✅ Data loaded successfully! Shape: {self.data.shape}")
+            print(f"📊 Columns: {list(self.data.columns)}")
+            return self.data
+        except Exception as e:
+            print(f"❌ Error loading data: {e}")
+            return None
+    
+    def explore_data(self) -> None:
+        """Basic data exploration with clean output."""
+        if self.data is None:
+            print("❌ No data loaded. Please load data first.")
+            return
+        
+        print("\n" + "="*60)
+        print("📊 DATA EXPLORATION")
+        print("="*60)
+        
+        print(f"Dataset shape: {self.data.shape}")
+        print(f"Missing values: {self.data.isnull().sum().sum()}")
+        
+        if self.data.isnull().sum().sum() > 0:
+            print("\n⚠️ Missing values by column:")
+            missing = self.data.isnull().sum()
+            for col, count in missing[missing > 0].items():
+                print(f"   {col}: {count} ({count/len(self.data)*100:.1f}%)")
+        
+        # Basic statistics for numeric columns
+        numeric_cols = self.data.select_dtypes(include=[np.number]).columns
+        print(f"\n📈 Numeric columns: {len(numeric_cols)}")
+        print(self.data[numeric_cols].describe().round(2))
+        
+        # Correlation heatmap
+        if len(numeric_cols) > 1:
+            plt.figure(figsize=(10, 8))
+            correlation_matrix = self.data[numeric_cols].corr()
+            mask = np.triu(np.ones_like(correlation_matrix, dtype=bool))
+            sns.heatmap(correlation_matrix, mask=mask, annot=True, cmap='RdYlBu_r', 
+                       center=0, fmt='.2f', square=True)
+            plt.title('Correlation Matrix')
+            plt.tight_layout()
+            plt.show()
+    
+    def prepare_data(self, feature_columns: List[str], target_column: str, 
+                    test_size: float = 0.2, random_state: int = 42) -> None:
+        """Prepare features and target for training."""
+        if self.data is None:
+            print("❌ No data loaded. Please load data first.")
+            return
+        
+        # Validate columns
+        missing_cols = [col for col in feature_columns + [target_column] 
+                       if col not in self.data.columns]
+        if missing_cols:
+            print(f"❌ Missing columns: {missing_cols}")
+            return
+        
+        # Select features and target
+        self.X = self.data[feature_columns].copy()
+        self.y = self.data[target_column].copy()
+        self.feature_names = feature_columns
+        self.target_name = target_column
+        
+        # Handle missing values
+        self.X = self.X.fillna(self.X.mean())
+        self.y = self.y.fillna(self.y.mean())
+        
+        # Split data
+        self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(
+            self.X, self.y, test_size=test_size, random_state=random_state
+        )
+        
+        # Scale features and target
+        self.X_train_scaled = self.scaler_X.fit_transform(self.X_train)
+        self.X_test_scaled = self.scaler_X.transform(self.X_test)
+        self.y_train_scaled = self.scaler_y.fit_transform(self.y_train.values.reshape(-1, 1)).ravel()
+        self.y_test_scaled = self.scaler_y.transform(self.y_test.values.reshape(-1, 1)).ravel()
+        
+        print(f"✅ Data prepared successfully!")
+        print(f"   Features: {len(feature_columns)} ({', '.join(feature_columns[:3])}{'...' if len(feature_columns) > 3 else ''})")
+        print(f"   Target: {target_column}")
+        print(f"   Training: {len(self.X_train)} samples")
+        print(f"   Testing: {len(self.X_test)} samples")
+    
+    def train_model(self, hidden_layers: List[int] = [64, 32], 
+                   dropout_rate: float = 0.2, activation: str = 'relu',
+                   learning_rate: float = 0.001, batch_size: int = 32,
+                   epochs: int = 100, patience: int = 10, 
+                   weight_decay: float = 0.01, verbose: bool = True) -> Dict:
+        """Train MLP model with specified parameters."""
+        if self.X_train is None:
+            print("❌ No training data prepared. Please prepare data first.")
+            return None
+        
+        # Create model
+        input_size = self.X_train_scaled.shape[1]
+        self.model = MLPRegressor(
+            input_size=input_size,
+            hidden_layers=hidden_layers,
+            dropout_rate=dropout_rate,
+            activation=activation
+        ).to(self.device)
+        
+        # Create data loaders
+        train_dataset = TensorDataset(
+            torch.FloatTensor(self.X_train_scaled),
+            torch.FloatTensor(self.y_train_scaled)
+        )
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+        
+        # Optimizer and loss function
+        optimizer = optim.Adam(self.model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+        criterion = nn.MSELoss()
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=0.5)
+        
+        # Training history
+        history = {
+            'train_loss': [],
+            'val_loss': [],
+            'train_r2': [],
+            'val_r2': [],
+            'learning_rate': []
+        }
+        
+        best_val_loss = float('inf')
+        patience_counter = 0
+        best_model_state = None
+        
+        if verbose:
+            print(f"🔥 Training MLP model...")
+            print(f"   Architecture: {input_size} → {' → '.join(map(str, hidden_layers))} → 1")
+            print(f"   Activation: {activation.upper()}, Dropout: {dropout_rate}")
+            print(f"   Learning rate: {learning_rate}, Batch size: {batch_size}")
+            print(f"   Weight decay: {weight_decay}, Max epochs: {epochs}")
+        
+        for epoch in range(epochs):
+            # Training phase
+            self.model.train()
+            train_losses = []
+            train_predictions = []
+            train_targets = []
+            
+            for batch_X, batch_y in train_loader:
+                batch_X = batch_X.to(self.device)
+                batch_y = batch_y.to(self.device)
+                
+                optimizer.zero_grad()
+                predictions = self.model(batch_X)
+                loss = criterion(predictions, batch_y)
+                loss.backward()
+                optimizer.step()
+                
+                train_losses.append(loss.item())
+                train_predictions.extend(predictions.detach().cpu().numpy())
+                train_targets.extend(batch_y.detach().cpu().numpy())
+            
+            # Validation phase
+            self.model.eval()
+            with torch.no_grad():
+                val_X = torch.FloatTensor(self.X_test_scaled).to(self.device)
+                val_y = torch.FloatTensor(self.y_test_scaled).to(self.device)
+                val_predictions = self.model(val_X)
+                val_loss = criterion(val_predictions, val_y).item()
+            
+            # Calculate R² scores
+            train_r2 = r2_score(train_targets, train_predictions)
+            val_r2 = r2_score(self.y_test_scaled, val_predictions.cpu().numpy())
+            
+            # Store history
+            history['train_loss'].append(np.mean(train_losses))
+            history['val_loss'].append(val_loss)
+            history['train_r2'].append(train_r2)
+            history['val_r2'].append(val_r2)
+            history['learning_rate'].append(optimizer.param_groups[0]['lr'])
+            
+            # Learning rate scheduling
+            scheduler.step(val_loss)
+            
+            # Early stopping
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                patience_counter = 0
+                best_model_state = copy.deepcopy(self.model.state_dict())
+            else:
+                patience_counter += 1
+            
+            if patience_counter >= patience:
+                if verbose:
+                    print(f"   Early stopping at epoch {epoch+1}")
+                break
+            
+            # Progress reporting
+            if verbose and (epoch + 1) % max(1, epochs // 10) == 0:
+                print(f"   Epoch {epoch+1:4d}: Train Loss={np.mean(train_losses):.4f}, "
+                      f"Val Loss={val_loss:.4f}, Val R²={val_r2:.4f}, "
+                      f"LR={optimizer.param_groups[0]['lr']:.6f}")
+        
+        # Load best model
+        if best_model_state is not None:
+            self.model.load_state_dict(best_model_state)
+        
+        self.training_history = history
+        
+        if verbose:
+            print(f"✅ Training completed!")
+            print(f"   Final validation R²: {history['val_r2'][-1]:.4f}")
+            print(f"   Best validation loss: {best_val_loss:.4f}")
+        
+        return history
+    
+    def tune_hyperparameters(self, param_grid: Optional[Dict] = None, 
+                           cv_folds: int = 3, quick_mode: bool = True,
+                           max_evals: int = 20) -> Dict:
+        """Hyperparameter tuning with cross-validation."""
+        if self.X_train is None:
+            print("❌ No training data prepared. Please prepare data first.")
+            return None
+        
+        if param_grid is None:
+            if quick_mode:
+                param_grid = {
+                    'hidden_layers': [[32], [64], [32, 16], [64, 32]],
+                    'learning_rate': [0.01, 0.001, 0.0001],
+                    'dropout_rate': [0.1, 0.2, 0.3],
+                    'weight_decay': [0.001, 0.01, 0.1]
+                }
+            else:
+                param_grid = {
+                    'hidden_layers': [[16], [32], [64], [128], [32, 16], [64, 32], [128, 64], [64, 32, 16]],
+                    'learning_rate': [0.1, 0.01, 0.001, 0.0001],
+                    'dropout_rate': [0.0, 0.1, 0.2, 0.3, 0.4],
+                    'weight_decay': [0.0, 0.001, 0.01, 0.1],
+                    'activation': ['relu', 'tanh', 'leaky_relu']
+                }
+        
+        # Generate parameter combinations
+        param_names = list(param_grid.keys())
+        param_values = list(param_grid.values())
+        all_combinations = list(product(*param_values))
+        
+        # Limit combinations for performance
+        if len(all_combinations) > max_evals:
+            np.random.shuffle(all_combinations)
+            all_combinations = all_combinations[:max_evals]
+        
+        print(f"🔥 Starting hyperparameter tuning...")
+        print(f"   Parameter combinations: {len(all_combinations)}")
+        print(f"   CV folds: {cv_folds}")
+        print(f"   Mode: {'Quick' if quick_mode else 'Comprehensive'}")
+        
+        best_score = -float('inf')
+        best_params = None
+        tuning_results = []
+        
+        start_time = time.time()
+        
+        for i, combination in enumerate(all_combinations):
+            params = dict(zip(param_names, combination))
+            
+            # Cross-validation
+            cv_scores = []
+            kf = KFold(n_splits=cv_folds, shuffle=True, random_state=42)
+            
+            for fold, (train_idx, val_idx) in enumerate(kf.split(self.X_train_scaled)):
+                X_fold_train = self.X_train_scaled[train_idx]
+                X_fold_val = self.X_train_scaled[val_idx]
+                y_fold_train = self.y_train_scaled[train_idx]
+                y_fold_val = self.y_train_scaled[val_idx]
+                
+                # Create temporary model
+                input_size = X_fold_train.shape[1]
+                temp_model = MLPRegressor(
+                    input_size=input_size,
+                    hidden_layers=params.get('hidden_layers', [64, 32]),
+                    dropout_rate=params.get('dropout_rate', 0.2),
+                    activation=params.get('activation', 'relu')
+                ).to(self.device)
+                
+                # Train temporary model
+                train_dataset = TensorDataset(
+                    torch.FloatTensor(X_fold_train),
+                    torch.FloatTensor(y_fold_train)
+                )
+                train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+                
+                optimizer = optim.Adam(
+                    temp_model.parameters(),
+                    lr=params.get('learning_rate', 0.001),
+                    weight_decay=params.get('weight_decay', 0.01)
+                )
+                criterion = nn.MSELoss()
+                
+                # Quick training for CV
+                epochs = 50 if quick_mode else 100
+                temp_model.train()
+                for epoch in range(epochs):
+                    for batch_X, batch_y in train_loader:
+                        batch_X = batch_X.to(self.device)
+                        batch_y = batch_y.to(self.device)
+                        
+                        optimizer.zero_grad()
+                        predictions = temp_model(batch_X)
+                        loss = criterion(predictions, batch_y)
+                        loss.backward()
+                        optimizer.step()
+                
+                # Evaluate
+                temp_model.eval()
+                with torch.no_grad():
+                    val_X = torch.FloatTensor(X_fold_val).to(self.device)
+                    val_y = torch.FloatTensor(y_fold_val).to(self.device)
+                    val_predictions = temp_model(val_X)
+                    val_r2 = r2_score(y_fold_val, val_predictions.cpu().numpy())
+                    cv_scores.append(val_r2)
+            
+            mean_cv_score = np.mean(cv_scores)
+            std_cv_score = np.std(cv_scores)
+            
+            tuning_results.append({
+                'params': params.copy(),
+                'mean_cv_score': mean_cv_score,
+                'std_cv_score': std_cv_score,
+                'cv_scores': cv_scores.copy()
+            })
+            
+            if mean_cv_score > best_score:
+                best_score = mean_cv_score
+                best_params = params.copy()
+            
+            if (i + 1) % max(1, len(all_combinations) // 10) == 0:
+                print(f"   Progress: {i+1}/{len(all_combinations)} - Best R²: {best_score:.4f}")
+        
+        elapsed_time = time.time() - start_time
+        
+        # Train final model with best parameters
+        print(f"✅ Hyperparameter tuning completed!")
+        print(f"   Time: {elapsed_time/60:.1f} minutes")
+        print(f"   Best CV score: {best_score:.4f}")
+        print(f"   Best parameters: {best_params}")
+        
+        # Train model with best parameters
+        self.train_model(verbose=False, **best_params)
+        self.best_params = best_params
+        
+        return {
+            'best_params': best_params,
+            'best_score': best_score,
+            'tuning_results': tuning_results
+        }
+    
+    def cross_validate_model(self, cv_folds: int = 5, 
+                           model_params: Optional[Dict] = None) -> Dict:
+        """Perform K-fold cross-validation for overfitting analysis."""
+        if self.X is None:
+            print("❌ No data prepared. Please prepare data first.")
+            return None
+        
+        # Use current model params if not specified
+        if model_params is None:
+            if self.model is None:
+                model_params = {
+                    'hidden_layers': [64, 32],
+                    'dropout_rate': 0.2,
+                    'learning_rate': 0.001
+                }
+            else:
+                model_params = {
+                    'hidden_layers': self.model.hidden_layers,
+                    'dropout_rate': self.model.dropout_rate,
+                    'learning_rate': 0.001,  # Default
+                    'activation': self.model.activation_name
+                }
+        
+        print(f"🔥 Performing {cv_folds}-fold cross-validation...")
+        
+        # Prepare full dataset
+        X_scaled = self.scaler_X.fit_transform(self.X)
+        y_scaled = self.scaler_y.fit_transform(self.y.values.reshape(-1, 1)).ravel()
+        
+        # Cross-validation results
+        train_r2_scores = []
+        test_r2_scores = []
+        train_rmse_scores = []
+        test_rmse_scores = []
+        train_mae_scores = []
+        test_mae_scores = []
+        
+        kf = KFold(n_splits=cv_folds, shuffle=True, random_state=42)
+        
+        for fold, (train_idx, test_idx) in enumerate(kf.split(X_scaled)):
+            X_fold_train = X_scaled[train_idx]
+            X_fold_test = X_scaled[test_idx]
+            y_fold_train = y_scaled[train_idx]
+            y_fold_test = y_scaled[test_idx]
+            
+            # Create and train fold model
+            input_size = X_fold_train.shape[1]
+            fold_model = MLPRegressor(
+                input_size=input_size,
+                hidden_layers=model_params.get('hidden_layers', [64, 32]),
+                dropout_rate=model_params.get('dropout_rate', 0.2),
+                activation=model_params.get('activation', 'relu')
+            ).to(self.device)
+            
+            # Train fold model
+            train_dataset = TensorDataset(
+                torch.FloatTensor(X_fold_train),
+                torch.FloatTensor(y_fold_train)
+            )
+            train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+            
+            optimizer = optim.Adam(
+                fold_model.parameters(),
+                lr=model_params.get('learning_rate', 0.001),
+                weight_decay=model_params.get('weight_decay', 0.01)
+            )
+            criterion = nn.MSELoss()
+            
+            # Training
+            fold_model.train()
+            for epoch in range(100):
+                for batch_X, batch_y in train_loader:
+                    batch_X = batch_X.to(self.device)
+                    batch_y = batch_y.to(self.device)
+                    
+                    optimizer.zero_grad()
+                    predictions = fold_model(batch_X)
+                    loss = criterion(predictions, batch_y)
+                    loss.backward()
+                    optimizer.step()
+            
+            # Evaluate
+            fold_model.eval()
+            with torch.no_grad():
+                # Training predictions
+                train_X = torch.FloatTensor(X_fold_train).to(self.device)
+                train_pred = fold_model(train_X).cpu().numpy()
+                
+                # Test predictions
+                test_X = torch.FloatTensor(X_fold_test).to(self.device)
+                test_pred = fold_model(test_X).cpu().numpy()
+            
+            # Calculate metrics
+            train_r2_scores.append(r2_score(y_fold_train, train_pred))
+            test_r2_scores.append(r2_score(y_fold_test, test_pred))
+            train_rmse_scores.append(np.sqrt(mean_squared_error(y_fold_train, train_pred)))
+            test_rmse_scores.append(np.sqrt(mean_squared_error(y_fold_test, test_pred)))
+            train_mae_scores.append(mean_absolute_error(y_fold_train, train_pred))
+            test_mae_scores.append(mean_absolute_error(y_fold_test, test_pred))
+            
+            print(f"   Fold {fold+1}/{cv_folds}: R² = {test_r2_scores[-1]:.4f}")
+        
+        # Process results
+        results = {
+            'r2_test_mean': np.mean(test_r2_scores),
+            'r2_test_std': np.std(test_r2_scores),
+            'r2_train_mean': np.mean(train_r2_scores),
+            'r2_train_std': np.std(train_r2_scores),
+            'r2_test_scores': test_r2_scores,
+            'r2_train_scores': train_r2_scores,
+            'rmse_test_mean': np.mean(test_rmse_scores),
+            'rmse_test_std': np.std(test_rmse_scores),
+            'rmse_train_mean': np.mean(train_rmse_scores),
+            'rmse_train_std': np.std(train_rmse_scores),
+            'mae_test_mean': np.mean(test_mae_scores),
+            'mae_test_std': np.std(test_mae_scores),
+            'mae_train_mean': np.mean(train_mae_scores),
+            'mae_train_std': np.std(train_mae_scores),
+        }
+        
+        # Calculate overfitting scores
+        results['r2_overfitting'] = self._calculate_overfitting_score(
+            results['r2_train_mean'], results['r2_test_mean'], 'r2'
+        )
+        results['rmse_overfitting'] = self._calculate_overfitting_score(
+            results['rmse_train_mean'], results['rmse_test_mean'], 'rmse'
+        )
+        results['mae_overfitting'] = self._calculate_overfitting_score(
+            results['mae_train_mean'], results['mae_test_mean'], 'mae'
+        )
+        
+        self.cv_results = results
+        print("✅ Cross-validation completed!")
+        
+        return results
+    
+    def _calculate_overfitting_score(self, train_mean: float, test_mean: float, metric: str) -> float:
+        """Calculate overfitting score based on train-test gap."""
+        if 'r2' in metric:
+            return ((train_mean - test_mean) / abs(train_mean)) * 100 if train_mean != 0 else 0
+        else:  # For error metrics (RMSE, MAE)
+            return ((test_mean - train_mean) / train_mean) * 100 if train_mean != 0 else 0
+    
+    def evaluate_test_set(self) -> Dict:
+        """Evaluate model on test set."""
+        if self.model is None:
+            print("❌ No model trained. Please train a model first.")
+            return None
+        
+        self.model.eval()
+        with torch.no_grad():
+            # Training predictions
+            train_X = torch.FloatTensor(self.X_train_scaled).to(self.device)
+            train_pred_scaled = self.model(train_X).cpu().numpy()
+            
+            # Test predictions
+            test_X = torch.FloatTensor(self.X_test_scaled).to(self.device)
+            test_pred_scaled = self.model(test_X).cpu().numpy()
+        
+        # Transform back to original scale
+        train_pred = self.scaler_y.inverse_transform(train_pred_scaled.reshape(-1, 1)).ravel()
+        test_pred = self.scaler_y.inverse_transform(test_pred_scaled.reshape(-1, 1)).ravel()
+        
+        # Calculate metrics
+        results = {
+            'train_r2': r2_score(self.y_train, train_pred),
+            'test_r2': r2_score(self.y_test, test_pred),
+            'train_rmse': np.sqrt(mean_squared_error(self.y_train, train_pred)),
+            'test_rmse': np.sqrt(mean_squared_error(self.y_test, test_pred)),
+            'train_mae': mean_absolute_error(self.y_train, train_pred),
+            'test_mae': mean_absolute_error(self.y_test, test_pred)
+        }
+        
+        # Store predictions for plotting
+        self.y_train_pred = train_pred
+        self.y_test_pred = test_pred
+        
+        return results
+    
+    def plot_results(self) -> None:
+        """Plot comprehensive model results."""
+        if not hasattr(self, 'y_test_pred'):
+            print("❌ No predictions available. Please run evaluate_test_set() first.")
+            return
+        
+        fig, axes = plt.subplots(2, 2, figsize=(15, 12))
+        
+        # 1. Actual vs Predicted
+        r2 = r2_score(self.y_test, self.y_test_pred)
+        axes[0, 0].scatter(self.y_test, self.y_test_pred, alpha=0.7, color='steelblue', s=60)
+        axes[0, 0].plot([self.y_test.min(), self.y_test.max()], 
+                       [self.y_test.min(), self.y_test.max()], 'r--', lw=2, label='Perfect Prediction')
+        axes[0, 0].text(0.05, 0.95, f'R² = {r2:.4f}', transform=axes[0, 0].transAxes,
+                       bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8), fontsize=11, fontweight='bold')
+        axes[0, 0].set_xlabel('Actual Values', fontweight='bold')
+        axes[0, 0].set_ylabel('Predicted Values', fontweight='bold')
+        axes[0, 0].set_title('MLP Performance: Actual vs Predicted', fontweight='bold', pad=20)
+        axes[0, 0].grid(True, alpha=0.3)
+        axes[0, 0].legend()
+        
+        # 2. Training History
+        if hasattr(self, 'training_history') and self.training_history:
+            history = self.training_history
+            epochs = range(1, len(history['train_loss']) + 1)
+            
+            # Plot losses
+            axes[0, 1].plot(epochs, history['train_loss'], 'b-', label='Train Loss', linewidth=2)
+            axes[0, 1].plot(epochs, history['val_loss'], 'r-', label='Validation Loss', linewidth=2)
+            axes[0, 1].set_xlabel('Epoch', fontweight='bold')
+            axes[0, 1].set_ylabel('Loss (MSE)', fontweight='bold')
+            axes[0, 1].set_title('Training History: Loss Curves', fontweight='bold', pad=20)
+            axes[0, 1].legend()
+            axes[0, 1].grid(True, alpha=0.3)
+            
+            # Add convergence info
+            final_train_loss = history['train_loss'][-1]
+            final_val_loss = history['val_loss'][-1]
+            axes[0, 1].text(0.05, 0.95, f'Final Train: {final_train_loss:.4f}\nFinal Val: {final_val_loss:.4f}', 
+                           transform=axes[0, 1].transAxes,
+                           bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.8), 
+                           fontsize=10, fontweight='bold')
+        else:
+            # Residuals plot as fallback
+            residuals = self.y_test - self.y_test_pred
+            axes[0, 1].scatter(self.y_test_pred, residuals, alpha=0.7, color='coral', s=60)
+            axes[0, 1].axhline(y=0, color='red', linestyle='--', lw=2, label='Zero Residual')
+            axes[0, 1].set_xlabel('Predicted Values', fontweight='bold')
+            axes[0, 1].set_ylabel('Residuals', fontweight='bold')
+            axes[0, 1].set_title('Residual Analysis', fontweight='bold', pad=20)
+            axes[0, 1].grid(True, alpha=0.3)
+            axes[0, 1].legend()
+        
+        # 3. Cross-Validation Performance
+        if hasattr(self, 'cv_results') and self.cv_results is not None:
+            cv_scores = self.cv_results.get('r2_test_scores', [])
+            if cv_scores:
+                folds = range(1, len(cv_scores) + 1)
+                axes[1, 0].bar(folds, cv_scores, color='lightgreen', alpha=0.8, edgecolor='darkgreen')
+                axes[1, 0].axhline(y=np.mean(cv_scores), color='red', linestyle='--', lw=2, 
+                                  label=f'Mean: {np.mean(cv_scores):.4f}')
+                axes[1, 0].axhline(y=r2, color='blue', linestyle=':', lw=2, 
+                                  label=f'Test R²: {r2:.4f}')
+                axes[1, 0].set_xlabel('CV Fold', fontweight='bold')
+                axes[1, 0].set_ylabel('R² Score', fontweight='bold')
+                axes[1, 0].set_title('Cross-Validation Consistency', fontweight='bold', pad=20)
+                axes[1, 0].grid(True, alpha=0.3, axis='y')
+                axes[1, 0].legend()
+            else:
+                # Training vs Test comparison
+                train_r2 = r2_score(self.y_train, self.y_train_pred)
+                metrics = ['R² Score', 'RMSE', 'MAE']
+                train_values = [
+                    train_r2,
+                    np.sqrt(mean_squared_error(self.y_train, self.y_train_pred)),
+                    mean_absolute_error(self.y_train, self.y_train_pred)
+                ]
+                test_values = [
+                    r2,
+                    np.sqrt(mean_squared_error(self.y_test, self.y_test_pred)),
+                    mean_absolute_error(self.y_test, self.y_test_pred)
+                ]
+                
+                x = np.arange(len(metrics))
+                width = 0.35
+                
+                axes[1, 0].bar(x - width/2, train_values, width, label='Training', 
+                              color='skyblue', alpha=0.8, edgecolor='navy')
+                axes[1, 0].bar(x + width/2, test_values, width, label='Test', 
+                              color='lightcoral', alpha=0.8, edgecolor='darkred')
+                axes[1, 0].set_xlabel('Metrics', fontweight='bold')
+                axes[1, 0].set_ylabel('Values', fontweight='bold')
+                axes[1, 0].set_title('Training vs Test Performance', fontweight='bold', pad=20)
+                axes[1, 0].set_xticks(x)
+                axes[1, 0].set_xticklabels(metrics)
+                axes[1, 0].legend()
+                axes[1, 0].grid(True, alpha=0.3, axis='y')
+        
+        # 4. Model Architecture Visualization
+        if self.model is not None:
+            # Create a simplified architecture diagram
+            layers_info = [len(self.feature_names)] + self.model.hidden_layers + [1]
+            layer_names = ['Input'] + [f'Hidden {i+1}' for i in range(len(self.model.hidden_layers))] + ['Output']
+            
+            y_positions = np.arange(len(layers_info))
+            bars = axes[1, 1].barh(y_positions, layers_info, color=plt.cm.viridis(np.linspace(0, 1, len(layers_info))))
+            
+            axes[1, 1].set_yticks(y_positions)
+            axes[1, 1].set_yticklabels(layer_names, fontweight='bold')
+            axes[1, 1].set_xlabel('Number of Neurons', fontweight='bold')
+            axes[1, 1].set_title('Neural Network Architecture', fontweight='bold', pad=20)
+            axes[1, 1].grid(True, alpha=0.3, axis='x')
+            
+            # Add annotations
+            for i, (bar, count) in enumerate(zip(bars, layers_info)):
+                axes[1, 1].text(bar.get_width() + max(layers_info) * 0.01, bar.get_y() + bar.get_height()/2,
+                               f'{count}', ha='left', va='center', fontweight='bold')
+            
+            # Add model info
+            total_params = sum(p.numel() for p in self.model.parameters())
+            activation = self.model.activation_name.upper()
+            dropout = self.model.dropout_rate
+            
+            info_text = f'Total Parameters: {total_params:,}\nActivation: {activation}\nDropout: {dropout:.2f}'
+            axes[1, 1].text(0.02, 0.98, info_text, transform=axes[1, 1].transAxes,
+                           bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.8),
+                           fontsize=10, fontweight='bold', va='top')
+        
+        plt.tight_layout()
+        plt.suptitle(f'MLP Model Analysis Report - Overall R² = {r2:.4f}', 
+                    fontsize=16, fontweight='bold', y=1.02)
+        plt.show()
+    
+    def generate_report(self, include_cv: bool = True, cv_folds: int = 5) -> Dict:
+        """Generate comprehensive model performance report."""
+        if self.model is None:
+            print("❌ No model trained. Please train a model first.")
+            return None
+        
+        print("\n" + "="*70)
+        print("📋 MLP MODEL PERFORMANCE REPORT")
+        print("="*70)
+        
+        report = {}
+        
+        # 1. Model Architecture Information
+        print("\n🔧 MODEL ARCHITECTURE:")
+        total_params = sum(p.numel() for p in self.model.parameters())
+        trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+        
+        print(f"   Input size: {self.model.input_size}")
+        print(f"   Hidden layers: {self.model.hidden_layers}")
+        print(f"   Activation: {self.model.activation_name.upper()}")
+        print(f"   Dropout rate: {self.model.dropout_rate}")
+        print(f"   Total parameters: {total_params:,}")
+        print(f"   Trainable parameters: {trainable_params:,}")
+        
+        report['model_architecture'] = {
+            'input_size': self.model.input_size,
+            'hidden_layers': self.model.hidden_layers,
+            'activation': self.model.activation_name,
+            'dropout_rate': self.model.dropout_rate,
+            'total_params': total_params,
+            'trainable_params': trainable_params
+        }
+        
+        # 2. Training Information
+        if hasattr(self, 'training_history') and self.training_history:
+            print("\n🏋️ TRAINING INFORMATION:")
+            history = self.training_history
+            print(f"   Epochs trained: {len(history['train_loss'])}")
+            print(f"   Final training loss: {history['train_loss'][-1]:.4f}")
+            print(f"   Final validation loss: {history['val_loss'][-1]:.4f}")
+            print(f"   Best validation R²: {max(history['val_r2']):.4f}")
+            
+            report['training_info'] = {
+                'epochs_trained': len(history['train_loss']),
+                'final_train_loss': history['train_loss'][-1],
+                'final_val_loss': history['val_loss'][-1],
+                'best_val_r2': max(history['val_r2'])
+            }
+        
+        # 3. Test Set Performance
+        print("\n📊 TEST SET PERFORMANCE:")
+        test_results = self.evaluate_test_set()
+        print(f"   R² Score: {test_results['test_r2']:.4f}")
+        print(f"   RMSE: {test_results['test_rmse']:.4f}")
+        print(f"   MAE: {test_results['test_mae']:.4f}")
+        report['test_performance'] = test_results
+        
+        # 4. Cross-Validation Analysis
+        if include_cv:
+            print("\n🔥 CROSS-VALIDATION ANALYSIS:")
+            cv_results = self.cross_validate_model(cv_folds=cv_folds)
+            
+            print(f"   R² (CV): {cv_results['r2_test_mean']:.4f} ± {cv_results['r2_test_std']:.4f}")
+            print(f"   RMSE (CV): {cv_results['rmse_test_mean']:.4f} ± {cv_results['rmse_test_std']:.4f}")
+            
+            # Overfitting analysis
+            r2_gap = cv_results['r2_overfitting']
+            print(f"\n⚖️ OVERFITTING ANALYSIS ({cv_folds}-fold CV):")
+            print(f"   R² Gap: {r2_gap:+.2f}%")
+            
+            status, level = self._assess_overfitting(r2_gap, cv_results['r2_test_mean'])
+            print(f"   Status: {status}")
+            
+            report['cross_validation'] = cv_results
+            report['overfitting_status'] = status
+            report['overfitting_level'] = level
+        
+        # 5. Recommendations
+        print("\n💡 RECOMMENDATIONS:")
+        recommendations = self._generate_recommendations(report)
+        for rec in recommendations:
+            print(f"   • {rec}")
+        report['recommendations'] = recommendations
+        
+        # 6. Overall Score
+        overall_score = self._calculate_overall_score(report)
+        print(f"\n⭐ OVERALL MODEL SCORE: {overall_score}/10")
+        report['overall_score'] = overall_score
+        
+        self.model_report = report
+        return report
+    
+    def _assess_overfitting(self, r2_gap: float, test_r2: float) -> tuple:
+        """Assess overfitting level with context."""
+        r2_gap_abs = abs(r2_gap)
+        
+        if test_r2 > 0.9:  # High-performance model
+            if r2_gap_abs < 8:
+                status = "✅ Excellent generalization (high-performance model)"
+                level = "low"
+            elif r2_gap_abs < 18:
+                status = "⚠️ Acceptable overfitting (high-performance model)"
+                level = "moderate"
+            else:
+                status = "❌ High overfitting detected"
+                level = "high"
+        else:  # Standard thresholds
+            if r2_gap_abs < 5:
+                status = "✅ Excellent generalization"
+                level = "low"
+            elif r2_gap_abs < 15:
+                status = "⚠️ Moderate overfitting"
+                level = "moderate"
+            else:
+                status = "❌ High overfitting detected"
+                level = "high"
+        
+        return status, level
+    
+    def _generate_recommendations(self, report: Dict) -> List[str]:
+        """Generate actionable recommendations."""
+        recommendations = []
+        
+        # Performance recommendations
+        if 'test_performance' in report:
+            test_r2 = report['test_performance']['test_r2']
+            if test_r2 < 0.6:
+                recommendations.append("Consider deeper architecture or feature engineering")
+            elif test_r2 > 0.9:
+                recommendations.append("Excellent performance - model is ready for deployment")
+        
+        # Architecture recommendations
+        if 'model_architecture' in report:
+            total_params = report['model_architecture']['total_params']
+            data_size = len(self.X_train) if self.X_train is not None else 0
+            
+            if total_params > data_size * 10:
+                recommendations.append("Model may be too complex - consider reducing layer sizes")
+            elif total_params < data_size / 100:
+                recommendations.append("Model may be too simple - consider adding layers or neurons")
+        
+        # Overfitting recommendations
+        if 'overfitting_level' in report:
+            level = report['overfitting_level']
+            if level == 'high':
+                recommendations.append("Reduce overfitting: increase dropout, reduce model complexity, or get more data")
+            elif level == 'moderate':
+                recommendations.append("Monitor overfitting: consider regularization techniques")
+        
+        # Training recommendations
+        if 'training_info' in report:
+            final_train_loss = report['training_info']['final_train_loss']
+            final_val_loss = report['training_info']['final_val_loss']
+            
+            if final_val_loss > final_train_loss * 2:
+                recommendations.append("Large train-validation gap suggests overfitting")
+        
+        if not recommendations:
+            recommendations.append("Model shows good performance and generalization")
+        
+        return recommendations
+    
+    def _calculate_overall_score(self, report: Dict) -> float:
+        """Calculate overall model score out of 10."""
+        score = 5.0  # Base score
+        
+        # Performance component (0-4 points)
+        if 'test_performance' in report:
+            test_r2 = report['test_performance']['test_r2']
+            score += max(0, min(4, test_r2 * 4))
+        
+        # Generalization component (0-3 points)
+        if 'overfitting_level' in report:
+            level = report['overfitting_level']
+            if level == 'low':
+                score += 3
+            elif level == 'moderate':
+                score += 2
+            else:
+                score += 1
+        
+        # Consistency component (0-1 points)
+        if 'cross_validation' in report:
+            r2_std = report['cross_validation']['r2_test_std']
+            if r2_std < 0.05:
+                score += 1
+            elif r2_std < 0.1:
+                score += 0.5
+        
+        return min(10.0, round(score, 1))
+    
+    def drop_features(self, features_to_drop: List[str], retrain: bool = True) -> None:
+        """Manually drop specified features and optionally retrain model."""
+        if self.feature_names is None:
+            print("❌ No features prepared. Please prepare data first.")
+            return
+        
+        # Validate features to drop
+        invalid_features = [f for f in features_to_drop if f not in self.feature_names]
+        if invalid_features:
+            print(f"⚠️ Invalid features (not found): {invalid_features}")
+            return
+        
+        # Remove features
+        remaining_features = [f for f in self.feature_names if f not in features_to_drop]
+        if len(remaining_features) == 0:
+            print("❌ Cannot drop all features!")
+            return
+        
+        print(f"🗑️ Dropping {len(features_to_drop)} features: {features_to_drop}")
+        print(f"✅ Remaining {len(remaining_features)} features: {remaining_features}")
+        
+        # Update data
+        self.prepare_data(remaining_features, self.target_name)
+        
+        # Retrain model if requested
+        if retrain and self.model is not None:
+            print("🔄 Retraining model with same architecture...")
+            # Keep the same architecture but adjust input size
+            old_hidden_layers = self.model.hidden_layers if hasattr(self.model, 'hidden_layers') else [64, 32]
+            old_dropout = self.model.dropout_rate if hasattr(self.model, 'dropout_rate') else 0.2
+            old_activation = self.model.activation_name if hasattr(self.model, 'activation_name') else 'relu'
+            
+            self.train_model(
+                hidden_layers=old_hidden_layers,
+                dropout_rate=old_dropout,
+                activation=old_activation,
+                verbose=False
+            )
+    
+    def calculate_feature_importance(self, n_repeats: int = 5) -> pd.DataFrame:
+        """Calculate feature importance using permutation importance."""
+        if self.model is None:
+            print("❌ No model trained. Please train a model first.")
+            return None
+        
+        print(f"🔍 Calculating feature importance ({n_repeats} repeats)...")
+        
+        # Create a sklearn-compatible wrapper for permutation importance
+        class PyTorchWrapper:
+            def __init__(self, model, device, scaler_y):
+                self.model = model
+                self.device = device
+                self.scaler_y = scaler_y
+            
+            def predict(self, X):
+                self.model.eval()
+                with torch.no_grad():
+                    X_tensor = torch.FloatTensor(X).to(self.device)
+                    predictions_scaled = self.model(X_tensor).cpu().numpy()
+                    # Transform back to original scale
+                    predictions = self.scaler_y.inverse_transform(predictions_scaled.reshape(-1, 1)).ravel()
+                return predictions
+        
+        wrapper = PyTorchWrapper(self.model, self.device, self.scaler_y)
+        
+        try:
+            perm_importance = permutation_importance(
+                wrapper, self.X_test_scaled, self.y_test,
+                n_repeats=n_repeats, random_state=42, n_jobs=-1
+            )
+            
+            importance_df = pd.DataFrame({
+                'feature': self.feature_names,
+                'importance': perm_importance.importances_mean,
+                'importance_std': perm_importance.importances_std
+            }).sort_values('importance', ascending=False)
+            
+            print("✅ Feature importance calculated!")
+            return importance_df
+            
+        except Exception as e:
+            print(f"❌ Error calculating feature importance: {e}")
+            return None
+    
+    def drop_low_importance_features(self, threshold: float = 0.01, 
+                                   max_features_to_drop: int = None, 
+                                   retrain: bool = True) -> List[str]:
+        """Drop features with importance below threshold."""
+        if self.model is None:
+            print("❌ No model trained. Please train a model first.")
+            return []
+        
+        print(f"🔍 Analyzing feature importance (threshold: {threshold})...")
+        
+        importance_df = self.calculate_feature_importance()
+        if importance_df is None:
+            return []
+        
+        # Find low importance features
+        low_importance_features = importance_df[
+            importance_df['importance'] < threshold
+        ]['feature'].tolist()
+        
+        if max_features_to_drop is not None:
+            low_importance_features = low_importance_features[:max_features_to_drop]
+        
+        if not low_importance_features:
+            print(f"✅ No features found below threshold {threshold}")
+            return []
+        
+        print(f"📊 Low importance features found:")
+        for feature in low_importance_features:
+            imp_value = importance_df[importance_df['feature'] == feature]['importance'].iloc[0]
+            print(f"   • {feature}: {imp_value:.4f}")
+        
+        # Drop features
+        if len(low_importance_features) < len(self.feature_names):
+            self.drop_features(low_importance_features, retrain=retrain)
+        else:
+            print("⚠️ Cannot drop all features - keeping at least one feature")
+            low_importance_features = low_importance_features[:-1]
+            if low_importance_features:
+                self.drop_features(low_importance_features, retrain=retrain)
+        
+        return low_importance_features
+    
+    def drop_highly_correlated_features(self, correlation_threshold: float = 0.95,
+                                      retrain: bool = True) -> List[str]:
+        """Drop features that are highly correlated with others."""
+        if self.X is None:
+            print("❌ No data prepared. Please prepare data first.")
+            return []
+        
+        print(f"🔍 Analyzing feature correlations (threshold: {correlation_threshold})...")
+        
+        # Calculate correlation matrix
+        correlation_matrix = self.X.corr().abs()
+        
+        # Find highly correlated features
+        features_to_drop = []
+        for i in range(len(correlation_matrix.columns)):
+            for j in range(i+1, len(correlation_matrix.columns)):
+                if correlation_matrix.iloc[i, j] >= correlation_threshold:
+                    feature_i = correlation_matrix.columns[i]
+                    feature_j = correlation_matrix.columns[j]
+                    
+                    # Keep the feature with higher importance (if available)
+                    if hasattr(self, 'model_report') and 'feature_importance' in self.model_report:
+                        importance_df = self.model_report['feature_importance']
+                        imp_i = importance_df[importance_df['feature'] == feature_i]['importance'].iloc[0]
+                        imp_j = importance_df[importance_df['feature'] == feature_j]['importance'].iloc[0]
+                        
+                        drop_feature = feature_i if imp_i < imp_j else feature_j
+                    else:
+                        # If no importance data, drop the second feature
+                        drop_feature = feature_j
+                    
+                    if drop_feature not in features_to_drop:
+                        features_to_drop.append(drop_feature)
+                        print(f"   📊 High correlation ({correlation_matrix.iloc[i, j]:.3f}): "
+                              f"{feature_i} ↔ {feature_j} → dropping {drop_feature}")
+        
+        if not features_to_drop:
+            print(f"✅ No highly correlated features found (threshold: {correlation_threshold})")
+            return []
+        
+        print(f"🗑️ Found {len(features_to_drop)} highly correlated features to drop")
+        
+        # Drop features
+        self.drop_features(features_to_drop, retrain=retrain)
+        return features_to_drop
+    
+    def feature_selection_analysis(self, correlation_threshold: float = 0.95,
+                                 importance_threshold: float = 0.01,
+                                 show_recommendations: bool = True) -> Dict:
+        """Comprehensive feature selection analysis with recommendations."""
+        if self.model is None:
+            print("❌ No model trained. Please train a model first.")
+            return {}
+        
+        print("\n" + "="*60)
+        print("🔍 FEATURE SELECTION ANALYSIS")
+        print("="*60)
+        
+        analysis_results = {}
+        
+        # 1. Feature Importance Analysis
+        print("\n1️⃣ FEATURE IMPORTANCE ANALYSIS:")
+        importance_df = self.calculate_feature_importance()
+        
+        if importance_df is not None:
+            print(f"📊 Feature importance scores:")
+            for _, row in importance_df.iterrows():
+                status = "🔴" if row['importance'] < importance_threshold else "🟢"
+                print(f"   {status} {row['feature']}: {row['importance']:.4f} ± {row['importance_std']:.4f}")
+            
+            low_importance = importance_df[importance_df['importance'] < importance_threshold]
+            analysis_results['low_importance_features'] = low_importance['feature'].tolist()
+            analysis_results['importance_df'] = importance_df
+        else:
+            analysis_results['low_importance_features'] = []
+        
+        # 2. Correlation Analysis  
+        print(f"\n2️⃣ CORRELATION ANALYSIS (threshold: {correlation_threshold}):")
+        correlation_matrix = self.X.corr().abs()
+        high_corr_pairs = []
+        
+        for i in range(len(correlation_matrix.columns)):
+            for j in range(i+1, len(correlation_matrix.columns)):
+                corr_value = correlation_matrix.iloc[i, j]
+                if corr_value >= correlation_threshold:
+                    feature_i = correlation_matrix.columns[i]
+                    feature_j = correlation_matrix.columns[j]
+                    high_corr_pairs.append((feature_i, feature_j, corr_value))
+                    print(f"   🔴 High correlation: {feature_i} ↔ {feature_j} ({corr_value:.3f})")
+        
+        if not high_corr_pairs:
+            print(f"   ✅ No highly correlated features found")
+        
+        analysis_results['high_correlation_pairs'] = high_corr_pairs
+        
+        # 3. Statistical Summary
+        print(f"\n3️⃣ STATISTICAL SUMMARY:")
+        print(f"   Total features: {len(self.feature_names)}")
+        print(f"   Low importance features: {len(analysis_results['low_importance_features'])}")
+        print(f"   High correlation pairs: {len(high_corr_pairs)}")
+        
+        # 4. Recommendations
+        if show_recommendations:
+            print(f"\n💡 FEATURE SELECTION RECOMMENDATIONS:")
+            recommendations = []
+            
+            if analysis_results['low_importance_features']:
+                recommendations.append(f"Consider dropping {len(analysis_results['low_importance_features'])} low-importance features")
+                
+            if high_corr_pairs:
+                recommendations.append(f"Review {len(high_corr_pairs)} highly correlated feature pairs")
+                
+            if len(self.feature_names) > 15:
+                recommendations.append("Consider dimensionality reduction for large feature sets")
+                
+            if not recommendations:
+                recommendations.append("Current feature set appears well-balanced")
+            
+            for i, rec in enumerate(recommendations, 1):
+                print(f"   {i}. {rec}")
+            
+            analysis_results['recommendations'] = recommendations
+        
+        return analysis_results
+    
+    def auto_feature_selection(self, correlation_threshold: float = 0.95,
+                              importance_threshold: float = 0.01,
+                              max_features_to_drop: int = None,
+                              retrain: bool = True) -> Dict:
+        """Automatically select features based on importance and correlation."""
+        print("\n🤖 AUTOMATIC FEATURE SELECTION")
+        print("="*50)
+        
+        original_features = self.feature_names.copy()
+        dropped_features = []
+        
+        # Step 1: Drop highly correlated features
+        print("1️⃣ Removing highly correlated features...")
+        corr_dropped = self.drop_highly_correlated_features(
+            correlation_threshold=correlation_threshold, retrain=False
+        )
+        dropped_features.extend(corr_dropped)
+        
+        # Step 2: Retrain model for importance calculation
+        if corr_dropped and self.model is not None:
+            print("🔄 Retraining model after correlation-based removal...")
+            old_hidden_layers = self.model.hidden_layers if hasattr(self.model, 'hidden_layers') else [64, 32]
+            old_dropout = self.model.dropout_rate if hasattr(self.model, 'dropout_rate') else 0.2
+            old_activation = self.model.activation_name if hasattr(self.model, 'activation_name') else 'relu'
+            
+            self.train_model(
+                hidden_layers=old_hidden_layers,
+                dropout_rate=old_dropout,
+                activation=old_activation,
+                verbose=False
+            )
+        
+        # Step 3: Drop low importance features
+        print("2️⃣ Removing low importance features...")
+        importance_dropped = self.drop_low_importance_features(
+            threshold=importance_threshold,
+            max_features_to_drop=max_features_to_drop,
+            retrain=retrain
+        )
+        dropped_features.extend(importance_dropped)
+        
+        # Summary
+        print(f"\n📋 FEATURE SELECTION SUMMARY:")
+        print(f"   Original features: {len(original_features)}")
+        print(f"   Remaining features: {len(self.feature_names)}")
+        print(f"   Dropped features: {len(dropped_features)}")
+        
+        if dropped_features:
+            print(f"   Dropped: {dropped_features}")
+        
+        return {
+            'original_features': original_features,
+            'remaining_features': self.feature_names.copy(),
+            'dropped_features': dropped_features,
+            'correlation_dropped': corr_dropped,
+            'importance_dropped': importance_dropped
+        }
+    
+    def compare_models_with_without_features(self, features_to_drop: List[str],
+                                           cv_folds: int = 5) -> Dict:
+        """Compare model performance with and without specified features."""
+        if self.model is None:
+            print("❌ No model trained. Please train a model first.")
+            return {}
+        
+        print(f"⚖️ COMPARING MODELS: WITH vs WITHOUT {len(features_to_drop)} features")
+        print("="*60)
+        
+        # Store current state
+        original_features = self.feature_names.copy()
+        original_hidden_layers = self.model.hidden_layers if hasattr(self.model, 'hidden_layers') else [64, 32]
+        original_dropout = self.model.dropout_rate if hasattr(self.model, 'dropout_rate') else 0.2
+        original_activation = self.model.activation_name if hasattr(self.model, 'activation_name') else 'relu'
+        
+        # Evaluate current model (with all features)
+        print("1️⃣ Evaluating model WITH all features...")
+        with_features_cv = self.cross_validate_model(cv_folds=cv_folds)
+        with_features_test = self.evaluate_test_set()
+        
+        # Drop features and retrain
+        print(f"2️⃣ Evaluating model WITHOUT features: {features_to_drop}")
+        self.drop_features(features_to_drop, retrain=True)
+        without_features_cv = self.cross_validate_model(cv_folds=cv_folds)
+        without_features_test = self.evaluate_test_set()
+        
+        # Compare results
+        print(f"\n📊 COMPARISON RESULTS:")
+        print(f"{'Metric':<20} {'With Features':<15} {'Without Features':<18} {'Difference':<12}")
+        print("-" * 65)
+        
+        metrics_comparison = {}
+        
+        # CV R2 comparison
+        with_cv_r2 = with_features_cv['r2_test_mean']
+        without_cv_r2 = without_features_cv['r2_test_mean']
+        diff_cv_r2 = without_cv_r2 - with_cv_r2
+        print(f"{'CV R²':<20} {with_cv_r2:<15.4f} {without_cv_r2:<18.4f} {diff_cv_r2:<12.4f}")
+        metrics_comparison['cv_r2_diff'] = diff_cv_r2
+        
+        # Test R2 comparison
+        with_test_r2 = with_features_test['test_r2']
+        without_test_r2 = without_features_test['test_r2']
+        diff_test_r2 = without_test_r2 - with_test_r2
+        print(f"{'Test R²':<20} {with_test_r2:<15.4f} {without_test_r2:<18.4f} {diff_test_r2:<12.4f}")
+        metrics_comparison['test_r2_diff'] = diff_test_r2
+        
+        # Overfitting comparison
+        with_overfitting = with_features_cv['r2_overfitting']
+        without_overfitting = without_features_cv['r2_overfitting']
+        diff_overfitting = abs(without_overfitting) - abs(with_overfitting)
+        print(f"{'Overfitting Gap':<20} {abs(with_overfitting):<15.2f}% {abs(without_overfitting):<17.2f}% {diff_overfitting:<11.2f}%")
+        metrics_comparison['overfitting_improvement'] = -diff_overfitting
+        
+        # Recommendation
+        print(f"\n💡 RECOMMENDATION:")
+        if diff_test_r2 >= -0.02 and diff_overfitting < 0:
+            recommendation = "✅ Drop features - similar performance with better generalization"
+        elif diff_test_r2 > 0:
+            recommendation = "✅ Drop features - improved performance"
+        elif diff_test_r2 < -0.05:
+            recommendation = "❌ Keep features - significant performance loss when dropped"
+        else:
+            recommendation = "⚠️ Marginal difference - consider other factors"
+        
+        print(f"   {recommendation}")
+        
+        # Restore original features if performance dropped significantly
+        if diff_test_r2 < -0.05:
+            print("🔄 Restoring original features due to performance loss...")
+            self.prepare_data(original_features, self.target_name)
+            self.train_model(
+                hidden_layers=original_hidden_layers,
+                dropout_rate=original_dropout,
+                activation=original_activation,
+                verbose=False
+            )
+        
+        return {
+            'with_features': {
+                'cv_results': with_features_cv,
+                'test_results': with_features_test,
+                'features': original_features
+            },
+            'without_features': {
+                'cv_results': without_features_cv,
+                'test_results': without_features_test,
+                'features': self.feature_names.copy()
+            },
+            'metrics_comparison': metrics_comparison,
+            'recommendation': recommendation
+        }
+    
+    def quick_analysis(self, feature_columns: List[str], target_column: str, 
+                      tune: bool = True, cv_folds: int = 5) -> Dict:
+        """Perform complete analysis pipeline in one function."""
+        print("🚀 Starting Quick MLP Analysis Pipeline...")
+        
+        # Prepare data
+        self.prepare_data(feature_columns, target_column)
+        
+        # Train or tune model
+        if tune:
+            print("\n🔧 Hyperparameter tuning...")
+            self.tune_hyperparameters(cv_folds=cv_folds, quick_mode=True)
+        else:
+            print("\n🔧 Training default model...")
+            self.train_model()
+        
+        # Generate report
+        print("\n📋 Generating comprehensive report...")
+        report = self.generate_report(include_cv=True, cv_folds=cv_folds)
+        
+        # Plot results
+        print("\n📊 Creating visualizations...")
+        self.plot_results()
+        
+        print("\n✅ Analysis completed!")
+        return report
+    
+    def auto_workflow(self, feature_columns: List[str], target_column: str, 
+                     optimization_target: str = 'balanced') -> Dict:
+        """Fully automated workflow with intelligent decision making."""
+        print("🤖 AUTOMATED MLP WORKFLOW")
+        print("="*40)
+        print(f"🎯 Optimization target: {optimization_target}")
+        
+        workflow_results = {'decisions': []}
+        
+        # Step 1: Data Preparation
+        print("\n📊 STEP 1: DATA PREPARATION")
+        self.prepare_data(feature_columns, target_column)
+        
+        data_size = len(self.X_train)
+        n_features = len(self.feature_names)
+        
+        # Step 2: Architecture Selection
+        print("\n🏗️ STEP 2: ARCHITECTURE SELECTION")
+        
+        if optimization_target == 'speed' or data_size < 200:
+            hidden_layers = [32]
+            decision = "Simple architecture for speed/small data"
+        elif optimization_target == 'performance' or data_size > 1000:
+            if n_features > 20:
+                hidden_layers = [128, 64, 32]
+                decision = "Deep architecture for large dataset/many features"
+            else:
+                hidden_layers = [64, 32]
+                decision = "Medium architecture for performance"
+        else:  # balanced
+            hidden_layers = [64, 32] if n_features <= 10 else [128, 64]
+            decision = f"Balanced architecture ({hidden_layers})"
+        
+        print(f"🤖 AUTO-DECISION: {decision}")
+        workflow_results['decisions'].append(decision)
+        
+        # Step 3: Training Parameters
+        print("\n🎯 STEP 3: TRAINING PARAMETERS")
+        
+        if optimization_target == 'speed':
+            epochs = 50
+            batch_size = min(64, data_size // 5)
+            learning_rate = 0.01
+            decision = f"Fast training (epochs={epochs}, batch={batch_size})"
+        elif optimization_target == 'performance':
+            epochs = 200
+            batch_size = 32
+            learning_rate = 0.001
+            decision = f"Performance training (epochs={epochs}, careful tuning)"
+        else:  # balanced
+            epochs = 100
+            batch_size = 32
+            learning_rate = 0.001
+            decision = f"Balanced training (epochs={epochs})"
+        
+        print(f"🤖 AUTO-DECISION: {decision}")
+        workflow_results['decisions'].append(decision)
+        
+        # Step 4: Model Training
+        print("\n🔧 STEP 4: MODEL TRAINING")
+        
+        training_params = {
+            'hidden_layers': hidden_layers,
+            'epochs': epochs,
+            'batch_size': batch_size,
+            'learning_rate': learning_rate,
+            'dropout_rate': 0.2,
+            'weight_decay': 0.01
+        }
+        
+        history = self.train_model(**training_params)
+        workflow_results['training_history'] = history
+        
+        # Step 5: Performance Analysis
+        print("\n📊 STEP 5: PERFORMANCE ANALYSIS")
+        
+        cv_results = self.cross_validate_model(cv_folds=3 if optimization_target == 'speed' else 5)
+        overfitting_score = abs(cv_results['r2_overfitting'])
+        
+        # Auto-correction for overfitting
+        if overfitting_score > 20 and optimization_target != 'performance':
+            print("🤖 AUTO-DECISION: High overfitting detected")
+            print("   → Retraining with higher dropout")
+            
+            corrected_params = training_params.copy()
+            corrected_params['dropout_rate'] = min(0.5, training_params['dropout_rate'] + 0.2)
+            corrected_params['weight_decay'] *= 2
+            
+            print(f"   → Adjusting: dropout {training_params['dropout_rate']:.2f} → {corrected_params['dropout_rate']:.2f}")
+            
+            self.train_model(**corrected_params)
+            cv_results_corrected = self.cross_validate_model(cv_folds=3)
+            new_overfitting = abs(cv_results_corrected['r2_overfitting'])
+            
+            if new_overfitting < overfitting_score:
+                print(f"   ✅ Improvement: {overfitting_score:.2f}% → {new_overfitting:.2f}%")
+                cv_results = cv_results_corrected
+                workflow_results['decisions'].append("Applied overfitting correction")
+            else:
+                print(f"   ❌ No improvement, keeping original model")
+                self.train_model(**training_params)
+                workflow_results['decisions'].append("Attempted but reverted overfitting correction")
+        
+        workflow_results['cv_results'] = cv_results
+        
+        # Step 6: Final Report
+        print("\n📋 STEP 6: FINAL REPORT")
+        
+        report = self.generate_report(include_cv=False, cv_folds=5)
+        report['cross_validation'] = cv_results
+        workflow_results['final_report'] = report
+        
+        # Step 7: Visualizations
+        print("\n📊 STEP 7: VISUALIZATIONS")
+        self.plot_results()
+        
+        # Summary
+        print(f"\n🎯 AUTOMATED DECISIONS SUMMARY:")
+        for i, decision in enumerate(workflow_results['decisions'], 1):
+            print(f"   {i}. {decision}")
+        
+        print(f"\n✅ AUTOMATED WORKFLOW COMPLETED!")
+        print(f"   Final R² Score: {report['test_performance']['test_r2']:.4f}")
+        print(f"   Overfitting Level: {abs(cv_results['r2_overfitting']):.2f}%")
+        print(f"   Overall Score: {report['overall_score']}/10")
+        
+    def interactive_workflow(self, feature_columns: List[str], target_column: str) -> Dict:
+        """Interactive workflow that guides user through the entire MLP process."""
+        print("🚀 INTERACTIVE MLP WORKFLOW")
+        print("="*50)
+        
+        workflow_results = {}
+        
+        # Step 1: Prepare Data
+        print("\n📊 STEP 1: DATA PREPARATION")
+        print("-" * 30)
+        self.prepare_data(feature_columns, target_column)
+        
+        # Step 2: Feature Selection Decision
+        print("\n🔍 STEP 2: FEATURE SELECTION")
+        print("-" * 30)
+        print("Would you like to perform feature selection analysis?")
+        print("1. Yes - Analyze and potentially drop features")
+        print("2. No - Keep all features")
+        print("3. Auto - Let the system decide")
+        
+        # For demo purposes, auto-select option 3
+        choice = "3"
+        print(f"Selected: {choice} - Auto")
+        
+        if choice in ["1", "3"]:
+            # Perform initial training for feature analysis
+            print("🔧 Training initial model for feature analysis...")
+            self.train_model(verbose=False)
+            
+            # Analyze features
+            analysis = self.feature_selection_analysis(show_recommendations=True)
+            workflow_results['feature_analysis'] = analysis
+            
+            if choice == "3":  # Auto decision
+                should_drop = (len(analysis.get('low_importance_features', [])) > 0 or 
+                             len(analysis.get('high_correlation_pairs', [])) > 0)
+                
+                if should_drop:
+                    print("🤖 AUTO-DECISION: Performing feature selection...")
+                    feature_results = self.auto_feature_selection()
+                    workflow_results['feature_selection'] = feature_results
+                else:
+                    print("🤖 AUTO-DECISION: Features look good, keeping all")
+        
+        # Step 3: Architecture Selection
+        print(f"\n🏗️ STEP 3: NEURAL NETWORK ARCHITECTURE")
+        print("-" * 30)
+        print("Choose architecture complexity:")
+        print("1. Simple (faster training, good for small datasets)")
+        print("2. Medium (balanced performance and speed)")
+        print("3. Complex (best performance, requires more data)")
+        print("4. Auto (system decides based on data)")
+        
+        arch_choice = "4"
+        print(f"Selected: {arch_choice} - Auto")
+        
+        data_size = len(self.X_train)
+        n_features = len(self.feature_names)
+        
+        if arch_choice == "1":
+            hidden_layers = [32]
+        elif arch_choice == "2":
+            hidden_layers = [64, 32]
+        elif arch_choice == "3":
+            hidden_layers = [128, 64, 32]
+        else:  # Auto
+            if data_size < 200:
+                hidden_layers = [32]
+                print("🤖 AUTO-DECISION: Simple architecture (small dataset)")
+            elif data_size > 1000 and n_features > 10:
+                hidden_layers = [128, 64, 32]
+                print("🤖 AUTO-DECISION: Complex architecture (large dataset)")
+            else:
+                hidden_layers = [64, 32]
+                print("🤖 AUTO-DECISION: Medium architecture (balanced)")
+        
+        # Step 4: Training Parameters
+        print(f"\n🎯 STEP 4: TRAINING CONFIGURATION")
+        print("-" * 30)
+        print("Choose training intensity:")
+        print("1. Fast (50 epochs, higher learning rate)")
+        print("2. Standard (100 epochs, balanced)")
+        print("3. Thorough (200 epochs, careful training)")
+        print("4. Auto (system decides)")
+        
+        train_choice = "4"
+        print(f"Selected: {train_choice} - Auto")
+        
+        if train_choice == "1":
+            epochs, lr = 50, 0.01
+        elif train_choice == "2":
+            epochs, lr = 100, 0.001
+        elif train_choice == "3":
+            epochs, lr = 200, 0.001
+        else:  # Auto
+            if data_size < 300:
+                epochs, lr = 200, 0.001
+                print("🤖 AUTO-DECISION: Thorough training (small dataset)")
+            else:
+                epochs, lr = 100, 0.001
+                print("🤖 AUTO-DECISION: Standard training (sufficient data)")
+        
+        # Step 5: Model Training
+        print(f"\n🔧 STEP 5: MODEL TRAINING")
+        print("-" * 30)
+        
+        history = self.train_model(
+            hidden_layers=hidden_layers,
+            epochs=epochs,
+            learning_rate=lr,
+            dropout_rate=0.2,
+            verbose=True
+        )
+        workflow_results['training_history'] = history
+        
+        # Step 6: Validation Analysis
+        print(f"\n⚖️ STEP 6: VALIDATION ANALYSIS")
+        print("-" * 30)
+        cv_results = self.cross_validate_model(cv_folds=5)
+        workflow_results['cv_results'] = cv_results
+        
+        # Step 7: Final Report
+        print(f"\n📋 STEP 7: COMPREHENSIVE REPORT")
+        print("-" * 30)
+        report = self.generate_report(include_cv=False, cv_folds=5)
+        report['cross_validation'] = cv_results
+        workflow_results['final_report'] = report
+        
+        # Step 8: Visualizations
+        print(f"\n📊 STEP 8: VISUALIZATIONS")
+        print("-" * 30)
+        self.plot_results()
+        
+        print("\n✅ INTERACTIVE WORKFLOW COMPLETED!")
+        print("="*50)
+        
+        return workflow_results
+    
+    def guided_workflow(self, feature_columns: List[str], target_column: str) -> Dict:
+        """Guided workflow with explanations and recommendations at each step."""
+        print("🎓 GUIDED MLP WORKFLOW (Educational)")
+        print("="*45)
+        print("This workflow will guide you through MLP model building with explanations.")
+        
+        workflow_results = {}
+        
+        # Step 1: Data Preparation with insights
+        print("\n📊 STEP 1: DATA PREPARATION & EXPLORATION")
+        print("-" * 40)
+        print("Understanding your data is crucial for neural network design...")
+        
+        self.prepare_data(feature_columns, target_column)
+        
+        # Data insights
+        print(f"\n💡 DATA INSIGHTS:")
+        print(f"   • Dataset size: {len(self.X)} samples")
+        print(f"   • Number of features: {len(feature_columns)}")
+        print(f"   • Target variable: {target_column}")
+        
+        data_size = len(self.X)
+        if data_size < 100:
+            print(f"   ⚠️  Small dataset - risk of overfitting, use simple architecture")
+        elif data_size > 1000:
+            print(f"   ✅ Large dataset - can support complex architectures")
+        
+        # Step 2: Feature Analysis
+        print(f"\n🔍 STEP 2: FEATURE ANALYSIS")
+        print("-" * 40)
+        print("Neural networks can learn complex feature interactions, but...")
+        print("• Too many irrelevant features can hurt performance")
+        print("• Correlated features can cause instability")
+        
+        # Train initial model for analysis
+        self.train_model(hidden_layers=[64, 32], epochs=50, verbose=False)
+        analysis = self.feature_selection_analysis()
+        
+        print(f"\n💡 FEATURE INSIGHTS:")
+        low_imp = len(analysis.get('low_importance_features', []))
+        high_corr = len(analysis.get('high_correlation_pairs', []))
+        
+        if low_imp > 0:
+            print(f"   • {low_imp} features have low importance")
+            print(f"     → Neural networks can ignore these, but removal improves efficiency")
+        
+        if high_corr > 0:
+            print(f"   • {high_corr} feature pairs are highly correlated")
+            print(f"     → Can cause training instability and redundancy")
+        
+        if low_imp > 0 or high_corr > 0:
+            print(f"\n🤖 RECOMMENDATION: Perform feature selection")
+            feature_results = self.auto_feature_selection()
+            workflow_results['feature_selection'] = feature_results
+        else:
+            print(f"\n✅ Your features look well-balanced!")
+        
+        # Step 3: Architecture Design
+        print(f"\n🏗️ STEP 3: NEURAL NETWORK ARCHITECTURE")
+        print("-" * 40)
+        print("MLP architecture considerations:")
+        print("   • Depth: More layers = more complex patterns")
+        print("   • Width: More neurons = more capacity")
+        print("   • Activation: Non-linearity type (ReLU, Tanh, etc.)")
+        print("   • Dropout: Prevents overfitting")
+        
+        n_features = len(self.feature_names)
+        if data_size < 200:
+            hidden_layers = [32]
+            print(f"\n💡 ARCHITECTURE DECISION: Simple ([32])")
+            print(f"   Reason: Small dataset needs simple model")
+        elif n_features > 15:
+            hidden_layers = [128, 64, 32]
+            print(f"\n💡 ARCHITECTURE DECISION: Deep ([128, 64, 32])")
+            print(f"   Reason: Many features benefit from deeper networks")
+        else:
+            hidden_layers = [64, 32]
+            print(f"\n💡 ARCHITECTURE DECISION: Medium ([64, 32])")
+            print(f"   Reason: Balanced for your data size and features")
+        
+        # Step 4: Training Strategy
+        print(f"\n🎯 STEP 4: TRAINING STRATEGY")
+        print("-" * 40)
+        print("Training considerations:")
+        print("   • Learning rate: How fast the model learns")
+        print("   • Batch size: Number of samples per update")
+        print("   • Epochs: Number of complete passes through data")
+        print("   • Early stopping: Prevents overfitting")
+        
+        if data_size < 300:
+            epochs, batch_size, lr = 200, 16, 0.001
+            print(f"\n💡 TRAINING STRATEGY: Careful training")
+            print(f"   Epochs: {epochs} (small data needs more epochs)")
+            print(f"   Batch size: {batch_size} (smaller batches for stability)")
+            print(f"   Learning rate: {lr} (conservative)")
+        else:
+            epochs, batch_size, lr = 100, 32, 0.001
+            print(f"\n💡 TRAINING STRATEGY: Standard training")
+            print(f"   Epochs: {epochs} (sufficient for convergence)")
+            print(f"   Batch size: {batch_size} (good balance)")
+            print(f"   Learning rate: {lr} (standard)")
+        
+        # Step 5: Model Training
+        print(f"\n🔧 STEP 5: MODEL TRAINING")
+        print("-" * 40)
+        
+        history = self.train_model(
+            hidden_layers=hidden_layers,
+            epochs=epochs,
+            batch_size=batch_size,
+            learning_rate=lr,
+            dropout_rate=0.2,
+            verbose=True
+        )
+        
+        # Step 6: Validation & Analysis
+        print(f"\n⚖️ STEP 6: MODEL VALIDATION")
+        print("-" * 40)
+        print("Validation helps us understand:")
+        print("   • True performance on unseen data")
+        print("   • Whether the model overfits")
+        print("   • Training stability and consistency")
+        
+        cv_results = self.cross_validate_model(cv_folds=5)
+        overfitting_level = abs(cv_results['r2_overfitting'])
+        
+        print(f"\n💡 VALIDATION INSIGHTS:")
+        if overfitting_level < 5:
+            print(f"   ✅ Excellent generalization ({overfitting_level:.1f}% gap)")
+        elif overfitting_level < 15:
+            print(f"   ⚠️  Moderate overfitting ({overfitting_level:.1f}% gap)")
+            print(f"       → Consider higher dropout or weight decay")
+        else:
+            print(f"   ❌ High overfitting ({overfitting_level:.1f}% gap)")
+            print(f"       → Model may not generalize well")
+        
+        workflow_results['validation_analysis'] = cv_results
+        
+        # Step 7: Final Report & Interpretation
+        print(f"\n📋 STEP 7: MODEL INTERPRETATION")
+        print("-" * 40)
+        
+        report = self.generate_report(include_cv=False, cv_folds=5)
+        report['cross_validation'] = cv_results
+        
+        print(f"\n🎯 MODEL QUALITY ASSESSMENT:")
+        test_r2 = report['test_performance']['test_r2']
+        
+        if test_r2 > 0.8:
+            quality = "Excellent"
+            emoji = "🌟"
+        elif test_r2 > 0.6:
+            quality = "Good"
+            emoji = "✅"
+        elif test_r2 > 0.4:
+            quality = "Fair"
+            emoji = "⚠️"
+        else:
+            quality = "Poor"
+            emoji = "❌"
+        
+        print(f"   {emoji} Model Quality: {quality} (R² = {test_r2:.3f})")
+        print(f"   📊 Overall Score: {report['overall_score']}/10")
+        
+        # Step 8: Recommendations
+        print(f"\n💡 NEXT STEPS & RECOMMENDATIONS:")
+        recommendations = report.get('recommendations', [])
+        for i, rec in enumerate(recommendations, 1):
+            print(f"   {i}. {rec}")
+        
+        # Visualization
+        print(f"\n📊 GENERATING VISUALIZATIONS...")
+        self.plot_results()
+        
+        workflow_results['final_report'] = report
+        workflow_results['quality_assessment'] = {
+            'quality': quality,
+            'test_r2': test_r2,
+            'overall_score': report['overall_score']
+        }
+        
+        print(f"\n🎓 GUIDED WORKFLOW COMPLETED!")
+        print("You now have a complete understanding of your MLP model!")
+        
+        return workflow_results
+
+# # Example usage and model creation functions
+# def create_sample_data(n_samples: int = 500, n_features: int = 8, noise_level: float = 0.1):
+#     """Create sample regression data for testing."""
+#     np.random.seed(42)
+    
+#     # Generate features with different patterns
+#     X = np.random.randn(n_samples, n_features)
+    
+#     # Create non-linear target with feature interactions
+#     y = (2 * X[:, 0] + 
+#          1.5 * X[:, 1]**2 + 
+#          0.8 * X[:, 2] * X[:, 3] + 
+#          0.5 * np.sin(X[:, 4]) + 
+#          0.3 * X[:, 5] +
+#          noise_level * np.random.randn(n_samples))
+    
+#     # Create feature names
+#     feature_names = [f'feature_{i+1}' for i in range(n_features)]
+    
+#     # Create DataFrame
+#     data = pd.DataFrame(X, columns=feature_names)
+#     data['target'] = y
+    
+#     return data, feature_names, 'target'
+
+# # Example usage
+# if __name__ == "__main__":
+#     print("🚀 ENHANCED MLP TOOL WITH PYTORCH")
+#     print("="*50)
+    
+#     # Create sample data
+#     sample_data, feature_cols, target_col = create_sample_data(n_samples=500, n_features=6)
+    
+#     # Initialize MLP
+#     mlp = EnhancedMLP()
+#     mlp.data = sample_data
+    
+#     print("\n📊 Sample data created with non-linear relationships")
+#     print(f"   Samples: {len(sample_data)}")
+#     print(f"   Features: {len(feature_cols)}")
+    
+#     # Example: Run auto workflow
+#     print("\n🤖 RUNNING AUTO WORKFLOW EXAMPLE...")
+#     results = mlp.auto_workflow(
+#         feature_columns=feature_cols,
+#         target_column=target_col,
+#         optimization_target='balanced'  # 'performance', 'speed', or 'balanced'
+#     )
+    
+#     print("\n🎉 Enhanced MLP tool is ready!")
+#     print("\nAvailable methods:")
+#     print("• train_model() - Train with custom parameters")
+#     print("• tune_hyperparameters() - Automated hyperparameter search")
+#     print("• quick_analysis() - Fast complete pipeline")
+#     print("• auto_workflow() - Intelligent automated workflow")
+#     print("• cross_validate_model() - K-fold cross validation")
+#     print("• generate_report() - Comprehensive analysis report")
