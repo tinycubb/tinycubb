@@ -1003,34 +1003,56 @@ class EnhancedMLP:
         
         print(f"🔍 Calculating feature importance ({n_repeats} repeats)...")
         
-        # Create a sklearn-compatible wrapper for permutation importance
-        class PyTorchWrapper:
-            def __init__(self, model, device, scaler_y):
-                self.model = model
-                self.device = device
-                self.scaler_y = scaler_y
-            
-            def predict(self, X):
-                self.model.eval()
-                with torch.no_grad():
-                    X_tensor = torch.FloatTensor(X).to(self.device)
-                    predictions_scaled = self.model(X_tensor).cpu().numpy()
-                    # Transform back to original scale
-                    predictions = self.scaler_y.inverse_transform(predictions_scaled.reshape(-1, 1)).ravel()
-                return predictions
-        
-        wrapper = PyTorchWrapper(self.model, self.device, self.scaler_y)
-        
         try:
-            perm_importance = permutation_importance(
-                wrapper, self.X_test_scaled, self.y_test,
-                n_repeats=n_repeats, random_state=42, n_jobs=-1
-            )
+            self.model.eval()
             
+            # Get baseline performance (R² score)
+            with torch.no_grad():
+                test_X = torch.FloatTensor(self.X_test_scaled).to(self.device)
+                baseline_pred_scaled = self.model(test_X).cpu().numpy()
+                baseline_pred = self.scaler_y.inverse_transform(baseline_pred_scaled.reshape(-1, 1)).ravel()
+                baseline_score = r2_score(self.y_test, baseline_pred)
+            
+            # Calculate importance for each feature
+            importances = []
+            importances_std = []
+            
+            for feature_idx in range(len(self.feature_names)):
+                feature_scores = []
+                
+                for repeat in range(n_repeats):
+                    # Create a copy of test data
+                    X_test_permuted = self.X_test_scaled.copy()
+                    
+                    # Permute the feature (shuffle its values)
+                    np.random.seed(42 + repeat)  # For reproducibility
+                    permuted_values = X_test_permuted[:, feature_idx].copy()
+                    np.random.shuffle(permuted_values)
+                    X_test_permuted[:, feature_idx] = permuted_values
+                    
+                    # Get predictions with permuted feature
+                    with torch.no_grad():
+                        permuted_X = torch.FloatTensor(X_test_permuted).to(self.device)
+                        permuted_pred_scaled = self.model(permuted_X).cpu().numpy()
+                        permuted_pred = self.scaler_y.inverse_transform(permuted_pred_scaled.reshape(-1, 1)).ravel()
+                        permuted_score = r2_score(self.y_test, permuted_pred)
+                    
+                    # Importance is the decrease in performance
+                    importance = baseline_score - permuted_score
+                    feature_scores.append(importance)
+                
+                importances.append(np.mean(feature_scores))
+                importances_std.append(np.std(feature_scores))
+                
+                # Progress indicator
+                if (feature_idx + 1) % max(1, len(self.feature_names) // 4) == 0:
+                    print(f"   Progress: {feature_idx + 1}/{len(self.feature_names)} features processed")
+            
+            # Create results DataFrame
             importance_df = pd.DataFrame({
                 'feature': self.feature_names,
-                'importance': perm_importance.importances_mean,
-                'importance_std': perm_importance.importances_std
+                'importance': importances,
+                'importance_std': importances_std
             }).sort_values('importance', ascending=False)
             
             print("✅ Feature importance calculated!")
@@ -1387,11 +1409,28 @@ class EnhancedMLP:
         return report
     
     def auto_workflow(self, feature_columns: List[str], target_column: str, 
-                     optimization_target: str = 'balanced') -> Dict:
-        """Fully automated workflow with intelligent decision making."""
+                     optimization_target: str = 'balanced', 
+                     custom_params: Optional[Dict] = None) -> Dict:
+        """Fully automated workflow with intelligent decision making.
+        
+        Args:
+            feature_columns: List of feature column names
+            target_column: Target column name
+            optimization_target: 'speed', 'performance', or 'balanced'
+            custom_params: Optional dict to override auto-decisions. Can include:
+                - 'hidden_layers': List[int] - Custom architecture
+                - 'learning_rate': float - Custom learning rate
+                - 'epochs': int - Custom number of epochs
+                - 'batch_size': int - Custom batch size
+                - 'dropout_rate': float - Custom dropout rate
+                - 'weight_decay': float - Custom weight decay
+                - 'activation': str - Custom activation function
+        """
         print("🤖 AUTOMATED MLP WORKFLOW")
         print("="*40)
         print(f"🎯 Optimization target: {optimization_target}")
+        if custom_params:
+            print(f"🔧 Custom parameters provided: {list(custom_params.keys())}")
         
         workflow_results = {'decisions': []}
         
@@ -1405,44 +1444,86 @@ class EnhancedMLP:
         # Step 2: Architecture Selection
         print("\n🏗️ STEP 2: ARCHITECTURE SELECTION")
         
-        if optimization_target == 'speed' or data_size < 200:
-            hidden_layers = [32]
-            decision = "Simple architecture for speed/small data"
-        elif optimization_target == 'performance' or data_size > 1000:
-            if n_features > 20:
-                hidden_layers = [128, 64, 32]
-                decision = "Deep architecture for large dataset/many features"
-            else:
-                hidden_layers = [64, 32]
-                decision = "Medium architecture for performance"
-        else:  # balanced
-            hidden_layers = [64, 32] if n_features <= 10 else [128, 64]
-            decision = f"Balanced architecture ({hidden_layers})"
+        if custom_params and 'hidden_layers' in custom_params:
+            hidden_layers = custom_params['hidden_layers']
+            decision = f"Custom architecture provided: {hidden_layers}"
+            print(f"🔧 CUSTOM OVERRIDE: {decision}")
+        else:
+            if optimization_target == 'speed' or data_size < 200:
+                hidden_layers = [32]
+                decision = "Simple architecture for speed/small data"
+            elif optimization_target == 'performance' or data_size > 1000:
+                if n_features > 20:
+                    hidden_layers = [128, 64, 32]
+                    decision = "Deep architecture for large dataset/many features"
+                else:
+                    hidden_layers = [64, 32]
+                    decision = "Medium architecture for performance"
+            else:  # balanced
+                hidden_layers = [64, 32] if n_features <= 10 else [128, 64]
+                decision = f"Balanced architecture ({hidden_layers})"
+            
+            print(f"🤖 AUTO-DECISION: {decision}")
         
-        print(f"🤖 AUTO-DECISION: {decision}")
         workflow_results['decisions'].append(decision)
         
         # Step 3: Training Parameters
         print("\n🎯 STEP 3: TRAINING PARAMETERS")
         
+        # Initialize default parameters based on optimization target
         if optimization_target == 'speed':
-            epochs = 50
-            batch_size = min(64, data_size // 5)
-            learning_rate = 0.01
-            decision = f"Fast training (epochs={epochs}, batch={batch_size})"
+            default_epochs = 50
+            default_batch_size = min(64, data_size // 5)
+            default_learning_rate = 0.01
+            default_dropout_rate = 0.2
+            default_weight_decay = 0.01
+            default_activation = 'relu'
+            base_decision = f"Fast training (epochs={default_epochs}, batch={default_batch_size})"
         elif optimization_target == 'performance':
-            epochs = 200
-            batch_size = 32
-            learning_rate = 0.001
-            decision = f"Performance training (epochs={epochs}, careful tuning)"
+            default_epochs = 200
+            default_batch_size = 32
+            default_learning_rate = 0.001
+            default_dropout_rate = 0.2
+            default_weight_decay = 0.01
+            default_activation = 'relu'
+            base_decision = f"Performance training (epochs={default_epochs}, careful tuning)"
         else:  # balanced
-            epochs = 100
-            batch_size = 32
-            learning_rate = 0.001
-            decision = f"Balanced training (epochs={epochs})"
+            default_epochs = 100
+            default_batch_size = 32
+            default_learning_rate = 0.001
+            default_dropout_rate = 0.2
+            default_weight_decay = 0.01
+            default_activation = 'relu'
+            base_decision = f"Balanced training (epochs={default_epochs})"
         
-        print(f"🤖 AUTO-DECISION: {decision}")
-        workflow_results['decisions'].append(decision)
+        # Override with custom parameters if provided
+        epochs = custom_params.get('epochs', default_epochs) if custom_params else default_epochs
+        batch_size = custom_params.get('batch_size', default_batch_size) if custom_params else default_batch_size
+        learning_rate = custom_params.get('learning_rate', default_learning_rate) if custom_params else default_learning_rate
+        dropout_rate = custom_params.get('dropout_rate', default_dropout_rate) if custom_params else default_dropout_rate
+        weight_decay = custom_params.get('weight_decay', default_weight_decay) if custom_params else default_weight_decay
+        activation = custom_params.get('activation', default_activation) if custom_params else default_activation
+        
+        # Report decisions
+        if custom_params:
+            overrides = []
+            if 'epochs' in custom_params: overrides.append(f"epochs={epochs}")
+            if 'batch_size' in custom_params: overrides.append(f"batch_size={batch_size}")
+            if 'learning_rate' in custom_params: overrides.append(f"lr={learning_rate}")
+            if 'dropout_rate' in custom_params: overrides.append(f"dropout={dropout_rate}")
+            if 'weight_decay' in custom_params: overrides.append(f"weight_decay={weight_decay}")
+            if 'activation' in custom_params: overrides.append(f"activation={activation}")
+            
+            if overrides:
+                custom_decision = f"Custom overrides: {', '.join(overrides)}"
+                print(f"🔧 CUSTOM OVERRIDE: {custom_decision}")
+                workflow_results['decisions'].append(custom_decision)
+            else:
+                print(f"🤖 AUTO-DECISION: {base_decision}")
+                workflow_results['decisions'].append(base_decision)
+        else:
+            print(f"🤖 AUTO-DECISION: {base_decision}")
+            workflow_results['decisions'].append(base_decision)
         
         # Step 4: Model Training
         print("\n🔧 STEP 4: MODEL TRAINING")
@@ -1452,12 +1533,18 @@ class EnhancedMLP:
             'epochs': epochs,
             'batch_size': batch_size,
             'learning_rate': learning_rate,
-            'dropout_rate': 0.2,
-            'weight_decay': 0.01
+            'dropout_rate': dropout_rate,
+            'weight_decay': weight_decay,
+            'activation': activation
         }
+        
+        print(f"🔧 Final training parameters:")
+        for param, value in training_params.items():
+            print(f"   • {param}: {value}")
         
         history = self.train_model(**training_params)
         workflow_results['training_history'] = history
+        workflow_results['final_params'] = training_params
         
         # Step 5: Performance Analysis
         print("\n📊 STEP 5: PERFORMANCE ANALYSIS")
@@ -1465,8 +1552,8 @@ class EnhancedMLP:
         cv_results = self.cross_validate_model(cv_folds=3 if optimization_target == 'speed' else 5)
         overfitting_score = abs(cv_results['r2_overfitting'])
         
-        # Auto-correction for overfitting
-        if overfitting_score > 20 and optimization_target != 'performance':
+        # Auto-correction for overfitting (only if no custom dropout was provided)
+        if overfitting_score > 20 and optimization_target != 'performance' and not (custom_params and 'dropout_rate' in custom_params):
             print("🤖 AUTO-DECISION: High overfitting detected")
             print("   → Retraining with higher dropout")
             
@@ -1484,10 +1571,14 @@ class EnhancedMLP:
                 print(f"   ✅ Improvement: {overfitting_score:.2f}% → {new_overfitting:.2f}%")
                 cv_results = cv_results_corrected
                 workflow_results['decisions'].append("Applied overfitting correction")
+                workflow_results['final_params'] = corrected_params
             else:
                 print(f"   ❌ No improvement, keeping original model")
                 self.train_model(**training_params)
                 workflow_results['decisions'].append("Attempted but reverted overfitting correction")
+        elif custom_params and 'dropout_rate' in custom_params and overfitting_score > 20:
+            print("⚠️  High overfitting detected, but custom dropout provided - keeping your settings")
+            workflow_results['decisions'].append("High overfitting detected but custom dropout preserved")
         
         workflow_results['cv_results'] = cv_results
         
@@ -1512,149 +1603,22 @@ class EnhancedMLP:
         print(f"   Overfitting Level: {abs(cv_results['r2_overfitting']):.2f}%")
         print(f"   Overall Score: {report['overall_score']}/10")
         
-    def interactive_workflow(self, feature_columns: List[str], target_column: str) -> Dict:
-        """Interactive workflow that guides user through the entire MLP process."""
-        print("🚀 INTERACTIVE MLP WORKFLOW")
-        print("="*50)
-        
-        workflow_results = {}
-        
-        # Step 1: Prepare Data
-        print("\n📊 STEP 1: DATA PREPARATION")
-        print("-" * 30)
-        self.prepare_data(feature_columns, target_column)
-        
-        # Step 2: Feature Selection Decision
-        print("\n🔍 STEP 2: FEATURE SELECTION")
-        print("-" * 30)
-        print("Would you like to perform feature selection analysis?")
-        print("1. Yes - Analyze and potentially drop features")
-        print("2. No - Keep all features")
-        print("3. Auto - Let the system decide")
-        
-        # For demo purposes, auto-select option 3
-        choice = "3"
-        print(f"Selected: {choice} - Auto")
-        
-        if choice in ["1", "3"]:
-            # Perform initial training for feature analysis
-            print("🔧 Training initial model for feature analysis...")
-            self.train_model(verbose=False)
-            
-            # Analyze features
-            analysis = self.feature_selection_analysis(show_recommendations=True)
-            workflow_results['feature_analysis'] = analysis
-            
-            if choice == "3":  # Auto decision
-                should_drop = (len(analysis.get('low_importance_features', [])) > 0 or 
-                             len(analysis.get('high_correlation_pairs', [])) > 0)
-                
-                if should_drop:
-                    print("🤖 AUTO-DECISION: Performing feature selection...")
-                    feature_results = self.auto_feature_selection()
-                    workflow_results['feature_selection'] = feature_results
-                else:
-                    print("🤖 AUTO-DECISION: Features look good, keeping all")
-        
-        # Step 3: Architecture Selection
-        print(f"\n🏗️ STEP 3: NEURAL NETWORK ARCHITECTURE")
-        print("-" * 30)
-        print("Choose architecture complexity:")
-        print("1. Simple (faster training, good for small datasets)")
-        print("2. Medium (balanced performance and speed)")
-        print("3. Complex (best performance, requires more data)")
-        print("4. Auto (system decides based on data)")
-        
-        arch_choice = "4"
-        print(f"Selected: {arch_choice} - Auto")
-        
-        data_size = len(self.X_train)
-        n_features = len(self.feature_names)
-        
-        if arch_choice == "1":
-            hidden_layers = [32]
-        elif arch_choice == "2":
-            hidden_layers = [64, 32]
-        elif arch_choice == "3":
-            hidden_layers = [128, 64, 32]
-        else:  # Auto
-            if data_size < 200:
-                hidden_layers = [32]
-                print("🤖 AUTO-DECISION: Simple architecture (small dataset)")
-            elif data_size > 1000 and n_features > 10:
-                hidden_layers = [128, 64, 32]
-                print("🤖 AUTO-DECISION: Complex architecture (large dataset)")
-            else:
-                hidden_layers = [64, 32]
-                print("🤖 AUTO-DECISION: Medium architecture (balanced)")
-        
-        # Step 4: Training Parameters
-        print(f"\n🎯 STEP 4: TRAINING CONFIGURATION")
-        print("-" * 30)
-        print("Choose training intensity:")
-        print("1. Fast (50 epochs, higher learning rate)")
-        print("2. Standard (100 epochs, balanced)")
-        print("3. Thorough (200 epochs, careful training)")
-        print("4. Auto (system decides)")
-        
-        train_choice = "4"
-        print(f"Selected: {train_choice} - Auto")
-        
-        if train_choice == "1":
-            epochs, lr = 50, 0.01
-        elif train_choice == "2":
-            epochs, lr = 100, 0.001
-        elif train_choice == "3":
-            epochs, lr = 200, 0.001
-        else:  # Auto
-            if data_size < 300:
-                epochs, lr = 200, 0.001
-                print("🤖 AUTO-DECISION: Thorough training (small dataset)")
-            else:
-                epochs, lr = 100, 0.001
-                print("🤖 AUTO-DECISION: Standard training (sufficient data)")
-        
-        # Step 5: Model Training
-        print(f"\n🔧 STEP 5: MODEL TRAINING")
-        print("-" * 30)
-        
-        history = self.train_model(
-            hidden_layers=hidden_layers,
-            epochs=epochs,
-            learning_rate=lr,
-            dropout_rate=0.2,
-            verbose=True
-        )
-        workflow_results['training_history'] = history
-        
-        # Step 6: Validation Analysis
-        print(f"\n⚖️ STEP 6: VALIDATION ANALYSIS")
-        print("-" * 30)
-        cv_results = self.cross_validate_model(cv_folds=5)
-        workflow_results['cv_results'] = cv_results
-        
-        # Step 7: Final Report
-        print(f"\n📋 STEP 7: COMPREHENSIVE REPORT")
-        print("-" * 30)
-        report = self.generate_report(include_cv=False, cv_folds=5)
-        report['cross_validation'] = cv_results
-        workflow_results['final_report'] = report
-        
-        # Step 8: Visualizations
-        print(f"\n📊 STEP 8: VISUALIZATIONS")
-        print("-" * 30)
-        self.plot_results()
-        
-        print("\n✅ INTERACTIVE WORKFLOW COMPLETED!")
-        print("="*50)
-        
         return workflow_results
     
-    def guided_workflow(self, feature_columns: List[str], target_column: str) -> Dict:
-        """Guided workflow with explanations and recommendations at each step."""
+    def guided_workflow(self, feature_columns: List[str], target_column: str, 
+                       auto_feature_selection: bool = False) -> Dict:
+        """Guided workflow with explanations and recommendations at each step.
+        
+        Args:
+            feature_columns: List of feature column names
+            target_column: Target column name
+            auto_feature_selection: If True, automatically performs feature selection.
+                                  If False, only analyzes and provides recommendations.
+        """
         print("🎓 GUIDED MLP WORKFLOW (Educational)")
         print("="*45)
         print("This workflow will guide you through MLP model building with explanations.")
+        print(f"🔧 Auto feature selection: {'ON' if auto_feature_selection else 'OFF'}")
         
         workflow_results = {}
         
@@ -1701,9 +1665,19 @@ class EnhancedMLP:
             print(f"     → Can cause training instability and redundancy")
         
         if low_imp > 0 or high_corr > 0:
-            print(f"\n🤖 RECOMMENDATION: Perform feature selection")
-            feature_results = self.auto_feature_selection()
-            workflow_results['feature_selection'] = feature_results
+            if auto_feature_selection:
+                print(f"\n🤖 AUTO-ACTION: Performing feature selection...")
+                feature_results = self.auto_feature_selection()
+                workflow_results['feature_selection'] = feature_results
+                print(f"   ✅ Features automatically optimized!")
+            else:
+                print(f"\n💡 RECOMMENDATION: Consider feature selection")
+                print(f"   → Set auto_feature_selection=True to automatically optimize features")
+                print(f"   → Or use auto_feature_selection() method manually later")
+                workflow_results['feature_recommendations'] = {
+                    'low_importance_features': analysis.get('low_importance_features', []),
+                    'high_correlation_pairs': analysis.get('high_correlation_pairs', [])
+                }
         else:
             print(f"\n✅ Your features look well-balanced!")
         
@@ -1836,6 +1810,7 @@ class EnhancedMLP:
         
         return workflow_results
 
+
 # # Example usage and model creation functions
 # def create_sample_data(n_samples: int = 500, n_features: int = 8, noise_level: float = 0.1):
 #     """Create sample regression data for testing."""
@@ -1860,6 +1835,7 @@ class EnhancedMLP:
 #     data['target'] = y
     
 #     return data, feature_names, 'target'
+
 
 # # Example usage
 # if __name__ == "__main__":
@@ -1891,5 +1867,6 @@ class EnhancedMLP:
 #     print("• tune_hyperparameters() - Automated hyperparameter search")
 #     print("• quick_analysis() - Fast complete pipeline")
 #     print("• auto_workflow() - Intelligent automated workflow")
+#     print("• guided_workflow() - Educational step-by-step workflow")
 #     print("• cross_validate_model() - K-fold cross validation")
 #     print("• generate_report() - Comprehensive analysis report")
