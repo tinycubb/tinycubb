@@ -1,0 +1,478 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.svm import SVR
+from sklearn.model_selection import train_test_split, cross_val_score, GridSearchCV, RandomizedSearchCV
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+import warnings
+warnings.filterwarnings('ignore')
+
+class SVRModelTool:
+    def __init__(self):
+        self.data = None
+        self.X = None
+        self.y = None
+        self.X_train = None
+        self.X_test = None
+        self.y_train = None
+        self.y_test = None
+        self.scaler_X = StandardScaler()
+        self.scaler_y = StandardScaler()
+        self.model = None
+        self.feature_names = None
+        self.target_name = None
+        
+    def load_data(self, csv_path):
+        """Load data from CSV file"""
+        try:
+            self.data = pd.read_csv(csv_path)
+            print("Data loaded successfully!")
+            print(f"Shape: {self.data.shape}")
+            print("\nColumns:", list(self.data.columns))
+            print("\nFirst 5 rows:")
+            print(self.data.head())
+            return True
+        except Exception as e:
+            print(f"Error loading data: {e}")
+            return False
+    
+    def prepare_data(self, target_column, drop_features=None, test_size=0.2):
+        """Prepare data for training"""
+        if self.data is None:
+            print("Please load data first!")
+            return False
+        
+        # Drop specified features
+        data_clean = self.data.copy()
+        if drop_features:
+            data_clean = data_clean.drop(columns=drop_features, errors='ignore')
+            print(f"Dropped features: {drop_features}")
+        
+        # Remove rows with missing values
+        data_clean = data_clean.dropna()
+        
+        # Separate features and target
+        self.y = data_clean[target_column].values
+        self.X = data_clean.drop(columns=[target_column]).values
+        self.feature_names = list(data_clean.drop(columns=[target_column]).columns)
+        self.target_name = target_column
+        
+        # Split data
+        self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(
+            self.X, self.y, test_size=test_size, random_state=42
+        )
+        
+        # Scale features and target
+        self.X_train_scaled = self.scaler_X.fit_transform(self.X_train)
+        self.X_test_scaled = self.scaler_X.transform(self.X_test)
+        
+        self.y_train_scaled = self.scaler_y.fit_transform(self.y_train.reshape(-1, 1)).flatten()
+        
+        print(f"Data prepared successfully!")
+        print(f"Features: {self.feature_names}")
+        print(f"Target: {self.target_name}")
+        print(f"Training set: {self.X_train.shape[0]} samples")
+        print(f"Test set: {self.X_test.shape[0]} samples")
+        return True
+    
+    def train_model_manual(self, C=1.0, gamma='scale', epsilon=0.1):
+        """Train SVR model with manual parameters"""
+        if self.X_train is None:
+            print("Please prepare data first!")
+            return False
+        
+        self.model = SVR(C=C, gamma=gamma, epsilon=epsilon, kernel='rbf')
+        self.model.fit(self.X_train_scaled, self.y_train_scaled)
+        print(f"Model trained with parameters: C={C}, gamma={gamma}, epsilon={epsilon}")
+        return True
+    
+    def train_model_reduced_overfitting(self):
+        """Train SVR model with parameters specifically tuned to reduce overfitting"""
+        if self.X_train is None:
+            print("Please prepare data first!")
+            return False
+        
+        # Parameters designed to reduce overfitting
+        param_dist = {
+            'C': [0.01, 0.1, 0.5, 1.0, 5.0],  # Lower C values to reduce complexity
+            'gamma': [0.001, 0.01, 0.1, 'scale'],  # Lower gamma values
+            'epsilon': [0.1, 0.2, 0.5, 1.0]  # Higher epsilon for more tolerance
+        }
+        
+        svr = SVR(kernel='rbf')
+        random_search = RandomizedSearchCV(
+            svr, param_dist, n_iter=15, cv=5,  # More CV folds
+            scoring='neg_mean_squared_error', random_state=42, n_jobs=-1
+        )
+        random_search.fit(self.X_train_scaled, self.y_train_scaled)
+        self.model = random_search.best_estimator_
+        print(f"Anti-overfitting tuning completed. Best parameters: {random_search.best_params_}")
+        print("💡 These parameters are chosen to reduce overfitting")
+        return True
+    
+    def train_model_quick(self):
+        """Train SVR model with quick tuning"""
+        if self.X_train is None:
+            print("Please prepare data first!")
+            return False
+        
+        param_dist = {
+            'C': [0.1, 1, 10, 100],
+            'gamma': ['scale', 'auto', 0.001, 0.01, 0.1, 1],
+            'epsilon': [0.01, 0.1, 0.2, 0.5]
+        }
+        
+        svr = SVR(kernel='rbf')
+        random_search = RandomizedSearchCV(
+            svr, param_dist, n_iter=20, cv=3, 
+            scoring='neg_mean_squared_error', random_state=42, n_jobs=-1
+        )
+        random_search.fit(self.X_train_scaled, self.y_train_scaled)
+        self.model = random_search.best_estimator_
+        print(f"Quick tuning completed. Best parameters: {random_search.best_params_}")
+        return True
+    
+    def train_model_auto(self):
+        """Train SVR model with comprehensive grid search"""
+        if self.X_train is None:
+            print("Please prepare data first!")
+            return False
+        
+        param_grid = {
+            'C': [0.1, 1, 10, 100, 1000],
+            'gamma': ['scale', 'auto', 0.001, 0.01, 0.1, 1],
+            'epsilon': [0.01, 0.1, 0.2, 0.5, 1.0]
+        }
+        
+        svr = SVR(kernel='rbf')
+        grid_search = GridSearchCV(
+            svr, param_grid, cv=5, 
+            scoring='neg_mean_squared_error', n_jobs=-1
+        )
+        grid_search.fit(self.X_train_scaled, self.y_train_scaled)
+        self.model = grid_search.best_estimator_
+        print(f"Auto tuning completed. Best parameters: {grid_search.best_params_}")
+        return True
+    
+    def evaluate_model(self):
+        """Evaluate model performance with cross-validation"""
+        if self.model is None:
+            print("Please train model first!")
+            return None
+        
+        # Cross-validation scores
+        cv_scores = cross_val_score(
+            self.model, self.X_train_scaled, self.y_train_scaled, 
+            cv=5, scoring='neg_mean_squared_error'
+        )
+        cv_rmse = np.sqrt(-cv_scores)
+        
+        # Predictions
+        y_train_pred_scaled = self.model.predict(self.X_train_scaled)
+        y_test_pred_scaled = self.model.predict(self.X_test_scaled)
+        
+        # Inverse transform predictions
+        y_train_pred = self.scaler_y.inverse_transform(y_train_pred_scaled.reshape(-1, 1)).flatten()
+        y_test_pred = self.scaler_y.inverse_transform(y_test_pred_scaled.reshape(-1, 1)).flatten()
+        
+        # Calculate metrics
+        train_r2 = r2_score(self.y_train, y_train_pred)
+        test_r2 = r2_score(self.y_test, y_test_pred)
+        train_rmse = np.sqrt(mean_squared_error(self.y_train, y_train_pred))
+        test_rmse = np.sqrt(mean_squared_error(self.y_test, y_test_pred))
+        train_mae = mean_absolute_error(self.y_train, y_train_pred)
+        test_mae = mean_absolute_error(self.y_test, y_test_pred)
+        
+        print("\n" + "="*50)
+        print("MODEL PERFORMANCE METRICS")
+        print("="*50)
+        print(f"Cross-Validation RMSE: {cv_rmse.mean():.4f} (±{cv_rmse.std()*2:.4f})")
+        print(f"Training R²: {train_r2:.4f}")
+        print(f"Testing R²: {test_r2:.4f}")
+        print(f"Training RMSE: {train_rmse:.4f}")
+        print(f"Testing RMSE: {test_rmse:.4f}")
+        print(f"Training MAE: {train_mae:.4f}")
+        print(f"Testing MAE: {test_mae:.4f}")
+        
+        # Overfitting analysis
+        if abs(train_r2 - test_r2) > 0.1:
+            print("\n⚠️  Potential overfitting detected (R² difference > 0.1)")
+        else:
+            print("\n✅ Model shows good generalization")
+        
+        return {
+            'cv_rmse_mean': cv_rmse.mean(),
+            'cv_rmse_std': cv_rmse.std(),
+            'train_r2': train_r2,
+            'test_r2': test_r2,
+            'train_rmse': train_rmse,
+            'test_rmse': test_rmse,
+            'y_train_pred': y_train_pred,
+            'y_test_pred': y_test_pred
+        }
+    
+    def plot_actual_vs_predicted(self):
+        """Plot actual vs predicted values"""
+        if self.model is None:
+            print("Please train and evaluate model first!")
+            return
+        
+        # Get predictions
+        y_train_pred_scaled = self.model.predict(self.X_train_scaled)
+        y_test_pred_scaled = self.model.predict(self.X_test_scaled)
+        y_train_pred = self.scaler_y.inverse_transform(y_train_pred_scaled.reshape(-1, 1)).flatten()
+        y_test_pred = self.scaler_y.inverse_transform(y_test_pred_scaled.reshape(-1, 1)).flatten()
+        
+        # Calculate R2 scores
+        train_r2 = r2_score(self.y_train, y_train_pred)
+        test_r2 = r2_score(self.y_test, y_test_pred)
+        
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+        
+        # Training data plot
+        ax1.scatter(self.y_train, y_train_pred, alpha=0.6, color='blue')
+        ax1.plot([self.y_train.min(), self.y_train.max()], 
+                [self.y_train.min(), self.y_train.max()], 'r--', lw=2)
+        ax1.set_xlabel(f'Actual {self.target_name}')
+        ax1.set_ylabel(f'Predicted {self.target_name}')
+        ax1.set_title(f'Training Set\nR² = {train_r2:.4f}')
+        ax1.text(0.05, 0.95, f'R² = {train_r2:.4f}', 
+                transform=ax1.transAxes, fontsize=12, 
+                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+        ax1.grid(True, alpha=0.3)
+        
+        # Testing data plot
+        ax2.scatter(self.y_test, y_test_pred, alpha=0.6, color='green')
+        ax2.plot([self.y_test.min(), self.y_test.max()], 
+                [self.y_test.min(), self.y_test.max()], 'r--', lw=2)
+        ax2.set_xlabel(f'Actual {self.target_name}')
+        ax2.set_ylabel(f'Predicted {self.target_name}')
+        ax2.set_title(f'Testing Set\nR² = {test_r2:.4f}')
+        ax2.text(0.05, 0.95, f'R² = {test_r2:.4f}', 
+                transform=ax2.transAxes, fontsize=12,
+                bbox=dict(boxstyle='round', facecolor='lightgreen', alpha=0.8))
+        ax2.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.show()
+    
+    def plot_feature_vs_target(self, feature_name):
+        """Plot CCG yield vs specific feature with actual and predicted values"""
+        if self.model is None:
+            print("Please train model first!")
+            return
+        
+        if feature_name not in self.feature_names:
+            print(f"Feature '{feature_name}' not found. Available features: {self.feature_names}")
+            return
+        
+        feature_idx = self.feature_names.index(feature_name)
+        
+        # Get predictions
+        y_train_pred_scaled = self.model.predict(self.X_train_scaled)
+        y_test_pred_scaled = self.model.predict(self.X_test_scaled)
+        y_train_pred = self.scaler_y.inverse_transform(y_train_pred_scaled.reshape(-1, 1)).flatten()
+        y_test_pred = self.scaler_y.inverse_transform(y_test_pred_scaled.reshape(-1, 1)).flatten()
+        
+        # Calculate R2 scores
+        train_r2 = r2_score(self.y_train, y_train_pred)
+        test_r2 = r2_score(self.y_test, y_test_pred)
+        
+        plt.figure(figsize=(12, 8))
+        
+        # Training data
+        plt.scatter(self.X_train[:, feature_idx], self.y_train, 
+                   alpha=0.6, color='blue', label='Actual (Train)', s=50)
+        plt.scatter(self.X_train[:, feature_idx], y_train_pred, 
+                   alpha=0.6, color='red', label='Predicted (Train)', s=50, marker='^')
+        
+        # Testing data
+        plt.scatter(self.X_test[:, feature_idx], self.y_test, 
+                   alpha=0.8, color='green', label='Actual (Test)', s=60, marker='s')
+        plt.scatter(self.X_test[:, feature_idx], y_test_pred, 
+                   alpha=0.8, color='orange', label='Predicted (Test)', s=60, marker='D')
+        
+        plt.xlabel(f'{feature_name}')
+        plt.ylabel(f'{self.target_name}')
+        plt.title(f'{feature_name} vs {self.target_name}\nActual vs Predicted Values')
+        plt.legend(loc='best')
+        plt.grid(True, alpha=0.3)
+        
+        # Add R² information
+        plt.text(0.02, 0.98, f'Train R² = {train_r2:.3f}\nTest R² = {test_r2:.3f}', 
+                transform=plt.gca().transAxes, fontsize=11, verticalalignment='top',
+                bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.8))
+        
+        plt.tight_layout()
+        plt.show()
+    
+    def plot_all_features(self):
+        """Plot all features vs target in a grid"""
+        if self.model is None:
+            print("Please train model first!")
+            return
+        
+        n_features = len(self.feature_names)
+        n_cols = 3
+        n_rows = (n_features + n_cols - 1) // n_cols
+        
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(15, 5*n_rows))
+        if n_features == 1:
+            axes = [axes]
+        else:
+            axes = axes.flatten()
+        
+        # Get predictions
+        y_train_pred_scaled = self.model.predict(self.X_train_scaled)
+        y_test_pred_scaled = self.model.predict(self.X_test_scaled)
+        y_train_pred = self.scaler_y.inverse_transform(y_train_pred_scaled.reshape(-1, 1)).flatten()
+        y_test_pred = self.scaler_y.inverse_transform(y_test_pred_scaled.reshape(-1, 1)).flatten()
+        
+        for i, feature_name in enumerate(self.feature_names):
+            ax = axes[i]
+            feature_idx = self.feature_names.index(feature_name)
+            
+            # Plot data
+            ax.scatter(self.X_train[:, feature_idx], self.y_train, 
+                      alpha=0.6, color='blue', label='Actual (Train)', s=30)
+            ax.scatter(self.X_train[:, feature_idx], y_train_pred, 
+                      alpha=0.6, color='red', label='Predicted (Train)', s=30, marker='^')
+            ax.scatter(self.X_test[:, feature_idx], self.y_test, 
+                      alpha=0.8, color='green', label='Actual (Test)', s=40, marker='s')
+            ax.scatter(self.X_test[:, feature_idx], y_test_pred, 
+                      alpha=0.8, color='orange', label='Predicted (Test)', s=40, marker='D')
+            
+            ax.set_xlabel(f'{feature_name}')
+            ax.set_ylabel(f'{self.target_name}')
+            ax.set_title(f'{feature_name}')
+            ax.grid(True, alpha=0.3)
+            if i == 0:  # Only show legend on first plot
+                ax.legend(fontsize=8)
+        
+        # Hide empty subplots
+        for j in range(n_features, len(axes)):
+            axes[j].set_visible(False)
+        
+        plt.tight_layout()
+        plt.show()
+    
+    def predict_single(self, input_values):
+        """Make prediction for single input
+        
+        Args:
+            input_values: List of values in the same order as self.feature_names
+        
+        Returns:
+            Predicted value
+        """
+        if self.model is None:
+            print("Please train model first!")
+            return None
+        
+        # Input constraints
+        constraints = {
+            'rxtor temp': (490, 510),
+            'cat cir rate': (6.0, 9.1),
+            'c/o ratio': (6, 12)
+        }
+        
+        # Validate input length
+        if len(input_values) != len(self.feature_names):
+            print(f"Error: Expected {len(self.feature_names)} values, got {len(input_values)}")
+            print(f"Required features: {self.feature_names}")
+            return None
+        
+        # Validate constraints
+        for i, (feature, value) in enumerate(zip(self.feature_names, input_values)):
+            for constraint_name, (min_val, max_val) in constraints.items():
+                if constraint_name.lower() in feature.lower():
+                    if value < min_val or value > max_val:
+                        print(f"Warning: {feature} = {value} is outside recommended range [{min_val}-{max_val}]")
+        
+        try:
+            # Make prediction
+            input_array = np.array(input_values).reshape(1, -1)
+            input_scaled = self.scaler_X.transform(input_array)
+            prediction_scaled = self.model.predict(input_scaled)
+            prediction = self.scaler_y.inverse_transform(prediction_scaled.reshape(-1, 1))[0][0]
+            
+            print(f"\n🎯 PREDICTION RESULT:")
+            print(f"Predicted {self.target_name}: {prediction:.4f}")
+            
+            print(f"\nInput values:")
+            for feature, value in zip(self.feature_names, input_values):
+                print(f"  {feature}: {value}")
+            
+            return prediction
+            
+        except Exception as e:
+            print(f"Error making prediction: {e}")
+            return None
+
+# ==========================================
+# SIMPLE USAGE EXAMPLES
+# ==========================================
+
+# def example_usage():
+#     """Example of how to use the SVR tool manually"""
+    
+#     # 1. Initialize
+#     svr = SVRModelTool()
+    
+#     # 2. Load data
+#     svr.load_data('your_data.csv')
+    
+#     # 3. Prepare data (drop unwanted features if needed)
+#     svr.prepare_data('ccg_yield', drop_features=['unwanted_column'])
+    
+#     # 4. Train model (choose one method)
+#     svr.train_model_quick()  # or train_model_auto() or train_model_manual(C=1, gamma='scale')
+    
+#     # 5. Evaluate
+#     results = svr.evaluate_model()
+    
+#     # 6. Plot results
+#     svr.plot_actual_vs_predicted()
+    
+#     # 7. Analyze specific features
+#     svr.plot_feature_vs_target('rxtor temp')  # or any feature name
+#     # svr.plot_all_features()  # plot all at once
+    
+#     # 8. Make predictions
+#     # Example: [rxtor_temp, cat_cir_rate, co_ratio, ...]
+#     prediction = svr.predict_single([500, 7.5, 9, 100, 200])  # adjust values for your features
+    
+#     return svr
+
+if __name__ == "__main__":
+    print("SVR Model Tool - Manual Usage")
+    print("="*40)
+    print("Example usage:")
+    print("""
+    # For overfitting problems (Train R² > Test R²):
+    svr.analyze_overfitting()                    # Detailed analysis
+    svr.train_model_reduced_overfitting()        # Anti-overfitting training
+    svr.plot_learning_curves()                  # Visualize overfitting
+    svr.feature_importance_analysis()           # Find unimportant features
+    
+    # Standard usage:
+    svr = SVRModelTool()
+    svr.load_data('data.csv')
+    svr.prepare_data('target_column')
+    
+    # Train (choose one)
+    svr.train_model_quick()      # Fast
+    svr.train_model_auto()       # Best results
+    svr.train_model_manual()     # Manual control
+    svr.train_model_reduced_overfitting()  # For overfitting problems
+    
+    # Evaluate and plot
+    svr.evaluate_model()
+    svr.plot_actual_vs_predicted()
+    svr.plot_feature_vs_target('feature_name')
+    
+    # Make prediction
+    svr.predict_single([value1, value2, value3, ...])
+    """)
